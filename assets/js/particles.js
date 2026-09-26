@@ -1,4 +1,5 @@
 import { READER_MOTION, smoother } from './reader-motion.js';
+import { INTRO_MOTION, introMotionState, introPhase, stepIntroSpring } from './intro-motion.js';
 
 const TAU = Math.PI * 2;
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
@@ -64,6 +65,9 @@ export class ParticleExperience {
     this.dpr = 1;
     this.mobile = false;
     this.progress = 0;
+    this.introRenderedProgress = null;
+    this.introVelocity = 0;
+    this.introDirect = false;
     this.temperature = 0.3;
     this.effort = 2;
     this.theme = 'ink';
@@ -129,6 +133,11 @@ export class ParticleExperience {
       pageGlyphs: this.pageTurn ? {
         from: this.pageTurn.fromGlyphCount || 0,
         to: this.pageTurn.toGlyphCount || 0,
+      } : null,
+      intro: this.progress < 1 ? {
+        phase: introPhase(this.progress),
+        progress: this.progress,
+        renderedProgress: this.introRenderedProgress ?? this.progress,
       } : null,
     };
   }
@@ -517,6 +526,7 @@ export class ParticleExperience {
     const desired = usesWebGLPool ? (this.mobile ? 10000 : 19000) : Math.min(1800, this.mobile ? 10000 : 19000);
     this.count = desired;
     this.xyz = new Float32Array(desired * 4);
+    this.introOffsets = new Float32Array(desired * 2);
     this.seed = new Float32Array(desired * 4);
     this.buffer = new Float32Array(desired * 7);
     const random = randomGenerator(55);
@@ -573,21 +583,176 @@ export class ParticleExperience {
     canvas.width = Math.max(1, Math.round(this.width));
     canvas.height = Math.max(1, Math.round(this.height));
     const context = canvas.getContext('2d', { willReadFrequently: true });
-    if (!context) { this.title = [this.width / 2, this.height / 2]; return; }
-    const size = this.mobile ? this.width * 0.225 : this.width * 0.0958;
-    context.font = `italic ${size}px Instrument, serif`;
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.fillStyle = '#fff';
-    context.fillText(this.titleText, this.width / 2, this.height / 2);
-    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    const points = [];
-    for (let y = Math.max(0, Math.floor(this.height / 2 - size)); y < Math.min(canvas.height, this.height / 2 + size); y += 1) {
-      for (let x = 0; x < canvas.width; x += 1) {
-        if (pixels[(y * canvas.width + x) * 4 + 3] > 70) points.push(x, y);
-      }
+    if (!context) {
+      this.title = [this.width / 2, this.height / 2];
+      this.introGeometry = null;
+      return;
     }
-    this.title = points.length ? points : [this.width / 2, this.height / 2];
+
+    const sampleInk = (text, size, draw) => {
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.font = `italic ${size}px Instrument, serif`;
+      context.textAlign = 'left';
+      context.textBaseline = 'alphabetic';
+      context.fillStyle = '#fff';
+      const metrics = context.measureText(text);
+      const origin = draw(metrics);
+      const points = [];
+      let minX = canvas.width;
+      let minY = canvas.height;
+      let maxX = 0;
+      let maxY = 0;
+      const scanLeft = Math.max(0, Math.floor(origin.x - (metrics.actualBoundingBoxLeft || 0) - 2));
+      const scanRight = Math.min(canvas.width, Math.ceil(origin.x + (metrics.actualBoundingBoxRight || metrics.width) + 2));
+      const scanTop = Math.max(0, Math.floor(origin.y - (metrics.actualBoundingBoxAscent || size) - 2));
+      const scanBottom = Math.min(canvas.height, Math.ceil(origin.y + (metrics.actualBoundingBoxDescent || size * 0.25) + 2));
+      const scanWidth = Math.max(1, scanRight - scanLeft);
+      const scanHeight = Math.max(1, scanBottom - scanTop);
+      const pixels = context.getImageData(scanLeft, scanTop, scanWidth, scanHeight).data;
+      for (let y = 0; y < scanHeight; y += 1) {
+        for (let x = 0; x < scanWidth; x += 1) {
+          if (pixels[(y * scanWidth + x) * 4 + 3] <= 70) continue;
+          const pointX = x + scanLeft;
+          const pointY = y + scanTop;
+          points.push(pointX, pointY);
+          minX = Math.min(minX, pointX);
+          minY = Math.min(minY, pointY);
+          maxX = Math.max(maxX, pointX);
+          maxY = Math.max(maxY, pointY);
+        }
+      }
+      return {
+        origin,
+        points: points.length ? points : [this.width / 2, this.height / 2],
+        bounds: points.length ? { minX, minY, maxX, maxY } : {
+          minX: this.width / 2,
+          minY: this.height / 2,
+          maxX: this.width / 2,
+          maxY: this.height / 2,
+        },
+        metrics,
+      };
+    };
+
+    const initialSize = this.mobile ? this.width * 0.225 : this.width * 0.0958;
+    const initial = sampleInk(this.titleText, initialSize, metrics => {
+      const inkWidth = (metrics.actualBoundingBoxLeft || 0) + (metrics.actualBoundingBoxRight || metrics.width);
+      const inkHeight = (metrics.actualBoundingBoxAscent || initialSize * 0.76)
+        + (metrics.actualBoundingBoxDescent || initialSize * 0.24);
+      const x = (this.width - inkWidth) / 2 + (metrics.actualBoundingBoxLeft || 0);
+      const y = (this.height - inkHeight) / 2 + (metrics.actualBoundingBoxAscent || initialSize * 0.76);
+      context.fillText(this.titleText, x, y);
+      return { x, y };
+    });
+
+    const helloSize = this.mobile ? this.width * 0.148 : this.width * 0.071;
+    const nameSize = this.mobile ? this.width * 0.134 : this.width * 0.064;
+    context.font = `italic ${helloSize}px Instrument, serif`;
+    const helloMetrics = context.measureText('Hello');
+    context.font = `italic ${nameSize}px Instrument, serif`;
+    const nameMetrics = context.measureText(this.titleText);
+    const helloLeft = helloMetrics.actualBoundingBoxLeft || 0;
+    const helloRight = helloMetrics.actualBoundingBoxRight || helloMetrics.width;
+    const nameLeft = nameMetrics.actualBoundingBoxLeft || 0;
+    const nameRight = nameMetrics.actualBoundingBoxRight || nameMetrics.width;
+    const gap = Math.max(4, nameSize * 0.16);
+    const groupWidth = helloLeft + helloRight + gap + nameLeft + nameRight;
+    const groupLeft = (this.width - groupWidth) / 2;
+    const ascent = Math.max(
+      helloMetrics.actualBoundingBoxAscent || helloSize * 0.76,
+      nameMetrics.actualBoundingBoxAscent || nameSize * 0.76,
+    );
+    const descent = Math.max(
+      helloMetrics.actualBoundingBoxDescent || helloSize * 0.24,
+      nameMetrics.actualBoundingBoxDescent || nameSize * 0.24,
+    );
+    const baseline = this.height / 2 + (ascent - descent) / 2;
+    const helloOrigin = groupLeft + helloLeft;
+    const nameOrigin = groupLeft + helloLeft + helloRight + gap + nameLeft;
+    const hello = sampleInk('Hello', helloSize, () => {
+      context.fillText('Hello', helloOrigin, baseline);
+      return { x: helloOrigin, y: baseline };
+    });
+    this.title = initial.points;
+    this.introCenters = {
+      sourceX: (initial.bounds.minX + initial.bounds.maxX) / 2,
+      sourceY: (initial.bounds.minY + initial.bounds.maxY) / 2,
+      helloX: (hello.bounds.minX + hello.bounds.maxX) / 2,
+      helloY: (hello.bounds.minY + hello.bounds.maxY) / 2,
+      nameX: nameOrigin + (nameRight - nameLeft) / 2,
+      nameY: baseline + ((nameMetrics.actualBoundingBoxDescent || 0) - (nameMetrics.actualBoundingBoxAscent || nameSize * .76)) / 2,
+    };
+    this._prepareIntroGeometry(initial, {
+      scale: nameSize / initialSize, x: nameOrigin, y: baseline,
+    }, hello.points);
+  }
+
+  _prepareIntroGeometry(source, name, helloPoints) {
+    if (!this.count) return;
+    const sourcePoints = source.points;
+    const sortPoints = points => {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (let i = 0; i < points.length; i += 2) {
+        minX = Math.min(minX, points[i]);
+        minY = Math.min(minY, points[i + 1]);
+        maxX = Math.max(maxX, points[i]);
+        maxY = Math.max(maxY, points[i + 1]);
+      }
+      const spanX = Math.max(1, maxX - minX);
+      const spanY = Math.max(1, maxY - minY);
+      const order = Array.from({ length: points.length / 2 }, (_, index) => index);
+      order.sort((left, right) => mortonCode(
+        points[left * 2], points[left * 2 + 1], minX, minY, spanX, spanY,
+      ) - mortonCode(
+        points[right * 2], points[right * 2 + 1], minX, minY, spanX, spanY,
+      ));
+      return order;
+    };
+    const sourceOrder = sortPoints(sourcePoints);
+    const helloOrder = sortPoints(helloPoints);
+    const nameIndices = [];
+    const helloIndices = [];
+    for (let i = 0; i < this.count; i += 1) {
+      // Evenly distributed, deterministic cohorts keep both silhouettes complete.
+      if ((i * 37) % 100 < 58) nameIndices.push(i);
+      else helloIndices.push(i);
+    }
+    const geometry = new Float32Array(this.count * 8);
+    const assign = (indices, cohort) => {
+      const length = indices.length;
+      for (let rank = 0; rank < length; rank += 1) {
+        const index = indices[rank];
+        const offset = index * 8;
+        const sourceRank = Math.min(sourceOrder.length - 1, Math.floor(rank * sourceOrder.length / length));
+        const sourceIndex = sourceOrder[sourceRank] * 2;
+        const targetRank = Math.min(helloOrder.length - 1, Math.floor(rank * helloOrder.length / length));
+        const target = helloOrder[targetRank] * 2;
+        const sx = sourcePoints[sourceIndex];
+        const sy = sourcePoints[sourceIndex + 1];
+        // Keep the name's actual strokes intact: an affine transform of the
+        // original glyph must not be remapped by a different raster's density.
+        const tx = cohort ? helloPoints[target] : (sx - source.origin.x) * name.scale + name.x;
+        const ty = cohort ? helloPoints[target + 1] : (sy - source.origin.y) * name.scale + name.y;
+        geometry[offset] = sx;
+        geometry[offset + 1] = sy;
+        geometry[offset + 2] = tx;
+        geometry[offset + 3] = ty;
+        geometry[offset + 4] = sx - this.introCenters.sourceX;
+        geometry[offset + 5] = sy - this.introCenters.sourceY;
+        geometry[offset + 6] = (ty - (cohort ? this.introCenters.helloY : this.introCenters.nameY));
+        geometry[offset + 7] = cohort;
+      }
+    };
+    assign(nameIndices, 0);
+    assign(helloIndices, 1);
+    this.introGeometry = geometry;
+    if (this.progress < 1 && !this.documentMorph && !this.pageTurn) {
+      this.introOffsets.fill(0);
+      this.introDirect = true;
+    }
   }
 
   _buildTree() {
@@ -695,11 +860,63 @@ export class ParticleExperience {
     }
 
     if (stage === 0) {
-      const point = Math.floor(a * (this.title.length / 2)) * 2;
-      out[0] = this.title[point] + Math.sin(this.time * 0.0005 + b * TAU) * 0.55;
-      out[1] = this.title[point + 1] + Math.cos(this.time * 0.0006 + c * TAU) * 0.55;
-      out[3] = 0.5 + d * 0.5;
-      out[4] = 0.65 + d * 0.5;
+      const geometry = this.introGeometry;
+      if (!geometry?.length) {
+        const point = Math.floor(a * (this.title.length / 2)) * 2;
+        out[0] = this.title[point];
+        out[1] = this.title[point + 1];
+        out[3] = 0.58 + d * 0.4;
+        out[4] = 0.65 + d * 0.5;
+        return;
+      }
+      if (this.introMotionProgress !== local) {
+        this.introMotionProgress = local;
+        this.introMotionPose = introMotionState(local);
+      }
+      const intro = this.introMotionPose;
+      const centers = this.introCenters;
+      const offset = index * 8;
+      const sx = geometry[offset];
+      const sy = geometry[offset + 1];
+      const tx = geometry[offset + 2];
+      const ty = geometry[offset + 3];
+      const cohort = geometry[offset + 7];
+      const travel = intro.travel;
+      const fold = intro.arc;
+      let x, y;
+      if (cohort) {
+        // Two faces of the same typographic sheet. Change the glyph only as
+        // the sheet turns edge-on, so readable strokes never shred or smear.
+        const centerX = mix(centers.sourceX, centers.helloX, intro.nameTravel);
+        const centerY = mix(centers.sourceY, centers.helloY, travel);
+        const dx = mix(geometry[offset + 4], tx - centers.helloX, intro.face);
+        const dy = mix(geometry[offset + 5], geometry[offset + 6], intro.face);
+        const perspective = w * 1.2;
+        const projection = perspective / (perspective - fold * (w * .045 - dy));
+        x = centerX + dx * projection;
+        y = centerY + dy * intro.roll * projection + fold * Math.min(32, h * .035);
+      } else {
+        const retreat = intro.nameTravel;
+        const depth = 4 * retreat * (1 - retreat);
+        const centerX = mix(centers.sourceX, centers.nameX, retreat);
+        const centerY = mix(centers.sourceY, centers.nameY, retreat);
+        x = centerX + (mix(sx, tx, retreat) - centerX) * (1 - depth * .07);
+        y = centerY + (mix(sy, ty, retreat) - centerY) * (1 - depth * .18) - depth * Math.min(12, h * .012);
+      }
+      const settle = intro.settle * (cohort ? 1 : -0.7);
+      const centerX = cohort ? centers.helloX : centers.nameX;
+      x += settle * (tx - centerX) * .016;
+      y += settle * geometry[offset + 6] * .016;
+      const breathe = this.reduced ? 0 : 0.28;
+      out[0] = x + Math.sin(this.time * 0.00042 + b * TAU) * breathe;
+      out[1] = y + Math.cos(this.time * 0.00038 + c * TAU) * breathe;
+      out[2] = cohort ? travel * .025 + fold * .12 : fold * .025;
+      out[3] = cohort
+        ? mix(0.58 + d * 0.4, 0.72 + d * 0.26, travel) * (.025 + .975 * intro.faceOpacity) * (1 - fold * .60)
+        : mix(0.58 + d * 0.4, 0.60 + d * 0.30, travel);
+      out[4] = cohort
+        ? mix(0.65 + d * 0.5, 0.78 + d * 0.48, travel)
+        : mix(0.65 + d * 0.5, 0.68 + d * 0.40, travel);
       return;
     }
 
@@ -807,8 +1024,22 @@ export class ParticleExperience {
 
   _update(delta) {
     const stage = Math.min(5, Math.floor(this.progress));
-    const local = this.progress - stage;
-    const transition = stage < 5 ? smooth(0.81, 1, local) : 0;
+    let local = this.progress - stage;
+    if (stage === 0) {
+      const step = this.first || this.introRenderedProgress === null
+        ? { position: local, velocity: 0 }
+        : stepIntroSpring(this.introRenderedProgress, this.introVelocity, local, delta / 60);
+      this.introRenderedProgress = step.position;
+      this.introVelocity = step.velocity;
+      local = clamp(step.position);
+    } else {
+      this.introRenderedProgress = null;
+      this.introVelocity = 0;
+    }
+    const directIntro = stage === 0 && local < INTRO_MOTION.releaseStart;
+    const transition = stage < 5
+      ? smooth(stage === 0 ? INTRO_MOTION.releaseStart : 0.81, 1, local)
+      : 0;
     const target = [0, 0, 0, 0, 0];
     const next = [0, 0, 0, 0, 0];
     this.waves = this.waves.filter(wave => this.time - wave.start < 1800);
@@ -827,6 +1058,15 @@ export class ParticleExperience {
       let y = this.xyz[q + 1];
       let vx = this.xyz[q + 2];
       let vy = this.xyz[q + 3];
+      const offset = i * 2;
+      if (directIntro) {
+        if (!this.introDirect) {
+          this.introOffsets[offset] = x - target[0];
+          this.introOffsets[offset + 1] = y - target[1];
+        }
+        x = target[0] + this.introOffsets[offset];
+        y = target[1] + this.introOffsets[offset + 1];
+      }
       const pointerX = x - this.pointer.x;
       const pointerY = y - this.pointer.y;
       const pointerDistance = Math.hypot(pointerX, pointerY);
@@ -850,8 +1090,17 @@ export class ParticleExperience {
       }
       vx = (vx + (target[0] - x) * 0.032 * delta) * Math.pow(0.79, delta);
       vy = (vy + (target[1] - y) * 0.032 * delta) * Math.pow(0.79, delta);
-      x += vx * delta;
-      y += vy * delta;
+      if (directIntro) {
+        // The plane follows one shared spring. Pointer/wave displacement stays
+        // independent, so a rapid scroll never interpolates unrelated glyphs.
+        this.introOffsets[offset] += vx * delta;
+        this.introOffsets[offset + 1] += vy * delta;
+        x = target[0] + this.introOffsets[offset];
+        y = target[1] + this.introOffsets[offset + 1];
+      } else {
+        x += vx * delta;
+        y += vy * delta;
+      }
       this.xyz[q] = x;
       this.xyz[q + 1] = y;
       this.xyz[q + 2] = vx;
@@ -859,6 +1108,7 @@ export class ParticleExperience {
       this._writeBuffer(i, x, y, target);
     }
     this.first = false;
+    this.introDirect = directIntro;
   }
 
   _writeBuffer(index, x, y, target) {
@@ -1206,7 +1456,13 @@ export class ParticleExperience {
     if (!this.xyz) return;
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
-    const transition = stage < 5 ? smooth(0.81, 1, local) : 0;
+    this.introRenderedProgress = stage === 0 ? local : null;
+    this.introVelocity = 0;
+    this.introOffsets.fill(0);
+    this.introDirect = stage === 0 && local < INTRO_MOTION.releaseStart;
+    const transition = stage < 5
+      ? smooth(stage === 0 ? INTRO_MOTION.releaseStart : 0.81, 1, local)
+      : 0;
     const target = [0, 0, 0, 0, 0];
     const next = [0, 0, 0, 0, 0];
     for (let i = 0; i < this.count; i += 1) {

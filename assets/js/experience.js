@@ -1,5 +1,6 @@
 import { ParticleExperience } from './particles.js';
 import { createArticleReader } from './article-reader.js';
+import { INTRO_MOTION } from './intro-motion.js';
 
 const root = document.documentElement;
 const canvas = document.querySelector('#story-particles');
@@ -7,12 +8,14 @@ const panels = [...document.querySelectorAll('[data-panel]')];
 const chapters = [...document.querySelectorAll('#story-navigation [data-scene]')];
 const navigation = document.querySelector('#story-navigation');
 const header = document.querySelector('.story-header');
+const introTitle = document.querySelector('#story-title');
 const motion = matchMedia('(prefers-reduced-motion: reduce)');
 const stops = [0, 1.35, 2.45, 3.25, 4.55, 5.25];
 const end = 5.82;
 let experience, enhanced = false, progress = 0, current = 0, scheduled = false;
 let resizing = 0, hashTimer = 0, pendingFocus = null, ready = false;
 let resizeProgress = 0, resizeDestination = null;
+let fallbackPosition = null;
 let reader, suspended = false;
 const homePath = location.pathname;
 
@@ -39,12 +42,18 @@ function update() {
   progress = clamp(scrollY / maxScroll() * end, 0, end);
   const scene = Math.min(panels.length - 1, Math.floor(progress));
   const local = progress - scene;
-  const opacity = motion.matches || scene === 5 ? 1 : 1 - smooth(.77, .98, local);
-  const intro = progress < .06;
+  const opacity = motion.matches || scene === 0 || scene === 5 ? 1 : 1 - smooth(.77, .98, local);
+  const intro = progress < INTRO_MOTION.chromeReveal;
+  const greeting = scene === 0 && progress >= INTRO_MOTION.greetingThreshold;
+  const title = greeting ? 'Hello Alcedo' : 'Alcedo';
+  if (introTitle.textContent !== title) introTitle.textContent = title;
+  introTitle.dataset.greeting = String(greeting);
   if (intro && (header.contains(document.activeElement) || navigation.contains(document.activeElement))) {
-    const title = panels[0].querySelector('h1');
-    title.tabIndex = -1;
-    title.focus({ preventScroll: true });
+    if (pendingFocus) document.activeElement.blur();
+    else {
+      introTitle.tabIndex = -1;
+      introTitle.focus({ preventScroll: true });
+    }
   }
   root.dataset.storyIntro = String(intro);
   for (const chrome of [header, navigation]) {
@@ -58,7 +67,7 @@ function update() {
     if (!accessible && panel.contains(document.activeElement)) {
       // Keep focus out of a subtree before making it inert/hidden.
       document.activeElement.blur();
-      if (progress >= .06) chapters[scene]?.focus({ preventScroll: true });
+      if (!intro) chapters[scene]?.focus({ preventScroll: true });
     }
     panel.classList.toggle('is-active', active);
     panel.style.opacity = active ? opacity : 0;
@@ -69,13 +78,13 @@ function update() {
     current = scene;
     chapters.forEach((link, index) => index === scene ? link.setAttribute('aria-current', 'step') : link.removeAttribute('aria-current'));
   }
-  if (pendingFocus === scene && opacity > .8) {
+  if (pendingFocus?.scene === scene && opacity > .8 && (pendingFocus.progress === null || Math.abs(progress - pendingFocus.progress) < .03)) {
     const heading = panels[scene].querySelector('h1,h2');
     heading.tabIndex = -1;
     heading.focus({ preventScroll: true });
     pendingFocus = null;
   }
-  experience.setProgress(motion.matches ? (scene === 0 ? 0 : stops[scene]) : progress);
+  experience.setProgress(motion.matches ? (scene === 0 ? (greeting ? INTRO_MOTION.greetingStop : 0) : stops[scene]) : progress);
   ready = true;
   clearTimeout(hashTimer);
   hashTimer = setTimeout(() => {
@@ -89,23 +98,26 @@ function requestUpdate() {
   scheduled = true;
   requestAnimationFrame(update);
 }
-function goToScene(scene, { history = true, focus = false, instant = false } = {}) {
+function goToScene(scene, { history = true, focus = false, instant = false, greeting = false } = {}) {
   if (suspended || location.pathname !== homePath) return;
   scene = clamp(scene, 0, panels.length - 1);
   if (!enhanced) {
     panels[scene].scrollIntoView({ behavior: 'auto' });
     return;
   }
+  const destination = scene === 0 && greeting ? INTRO_MOTION.greetingStop : stops[scene];
   clearTimeout(hashTimer);
   if (history && location.hash !== '#' + panels[scene].id) window.history.pushState({}, '', '#' + panels[scene].id);
   // Keep explicit navigation until the next settled frame: a resize event may
   // still be queued even if a rapid rotation returned to the original size.
-  resizeDestination = stops[scene];
-  pendingFocus = focus ? scene : null;
-  scrollTo({ top: maxScroll() * stops[scene] / end, behavior: instant || motion.matches ? 'instant' : 'smooth' });
+  resizeDestination = destination;
+  pendingFocus = focus ? { scene, progress: scene === 0 ? destination : null } : null;
+  if (focus && document.activeElement === introTitle) introTitle.blur();
+  scrollTo({ top: maxScroll() * destination / end, behavior: instant || motion.matches ? 'instant' : 'smooth' });
   requestUpdate();
 }
 function fallback() {
+  if (enhanced) fallbackPosition = { scene: current, progress };
   enhanced = false;
   window.history.scrollRestoration = 'auto';
   root.classList.remove('immersive-ready');
@@ -121,7 +133,8 @@ function fallback() {
 }
 function enhance() {
   const visible = panels.reduce((best, panel, index) => Math.abs(panel.getBoundingClientRect().top) < Math.abs(panels[best].getBoundingClientRect().top) ? index : best, 0);
-  progress = stops[visible];
+  progress = fallbackPosition?.scene === visible ? fallbackPosition.progress : stops[visible];
+  fallbackPosition = null;
   root.classList.add('immersive-ready');
   enhanced = true;
   window.history.scrollRestoration = 'manual';
@@ -217,6 +230,13 @@ async function initialize() {
     addEventListener('keydown', event => {
       if (!enhanced || suspended || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || document.querySelector('dialog[open]')) return;
       if (event.target.isContentEditable || event.target.closest('input,textarea,select,button,a')) return;
+      const forward = event.key === 'ArrowDown' || event.key === 'PageDown';
+      const backward = event.key === 'ArrowUp' || event.key === 'PageUp';
+      if ((forward && current === 0 && progress < INTRO_MOTION.greetingStop - .08) || (backward && current === 1)) {
+        event.preventDefault();
+        goToScene(0, { focus: true, greeting: true });
+        return;
+      }
       const destination = { ArrowDown: current + 1, PageDown: current + 1, ArrowUp: current - 1, PageUp: current - 1, Home: 0, End: 5 }[event.key];
       if (destination === undefined) return;
       event.preventDefault();

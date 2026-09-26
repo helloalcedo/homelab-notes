@@ -17,6 +17,7 @@
 .story-scene { position: relative; min-height: 100svh; padding: 90px 7%; }
 .story-intro { display: grid; place-items: center; }
 .story-title { margin: 0; font: italic 9.58vw/1 var(--serif); letter-spacing: 0; }
+.story-title[data-greeting=true] { font-size: 7.1vw; }
 .scene-copy { max-width: 480px; }
 .scene-eyebrow { font: 9px/1.5 var(--mono); color: var(--muted); letter-spacing: 1.6px; margin: 0 0 24px; display: flex; align-items: center; gap: 10px; }
 .scene-eyebrow:before { content: ''; width: 14px; height: 1px; background: var(--accent); }
@@ -106,6 +107,7 @@ html.immersive-ready { scroll-behavior: auto; scroll-padding-top: 0; }
  .story-navigation { right: 4%; top: auto; bottom: 14px; left: 4%; transform: none; flex-direction: row; justify-content: center; gap: 7px; }
  .story-navigation a { height: 44px; min-width: 41px; font-size: 10px; gap: 5px; }.story-navigation [aria-current] i { width: 12px; }
  .story-scene { padding: 80px 7%; }.story-title { font-size: 22.5vw; }
+ .story-title[data-greeting=true] { font-size: 14.8vw; }
  .scene-eyebrow { font-size: 9px; margin-bottom: 17px; }.story-scene h2 { font-size: 29px; line-height: 1.4; letter-spacing: -.9px; margin-bottom: 14px; }
  .scene-description { font-size: 12px; line-height: 1.8; }.scene-topics { font-size: 7px; gap: 12px; margin-top: 16px; }.scene-link { margin-top: 17px; min-height: 44px; font-size: 11px; }
  .immersive-ready .scene-copy { top: 14%; left: 7%; width: 84%; max-width: none; transform: none; }
