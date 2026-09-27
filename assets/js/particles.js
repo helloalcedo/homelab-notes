@@ -1,5 +1,5 @@
 import { READER_MOTION, smoother } from './reader-motion.js';
-import { createChapterScatter, blendChapterTransition, chapterArrivalScale } from './chapter-transition.js';
+import { CHAPTER_MOTION, createChapterFlow, blendChapterTransition } from './chapter-transition.js';
 
 const TAU = Math.PI * 2;
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
@@ -66,7 +66,6 @@ export class ParticleExperience {
     this.dpr = 1;
     this.mobile = false;
     this.progress = 0;
-    this.reverseArrivalUntil = 0;
     this.temperature = 0.3;
     this.effort = 2;
     this.theme = 'ink';
@@ -111,7 +110,7 @@ export class ParticleExperience {
     queueMicrotask(() => { if (!this.destroyed) this._dispatchState(); });
     document.fonts?.load?.('italic 180px Instrument', this.titleText).then(() => {
       if (this.destroyed) return;
-      this._makeTitle();
+      this._buildGeometry();
       if (this.pageTurn) this._renderPageTurn();
       else if (this.documentMorph) this._renderDocumentMorph();
       else if (this.reduced) this._snapToTargets();
@@ -211,11 +210,6 @@ export class ParticleExperience {
 
   setProgress(value) {
     const next = clamp(Number(value) || 0, 0, 5.82);
-    // History can skip the entire dissolve window on its way back to Homelab.
-    // Guard that arrival briefly without changing the network's usual pointer response.
-    if (this.progress >= 2 && next >= 1 && next < 2 && this.progress - next > .5) {
-      this.reverseArrivalUntil = this.time + 800;
-    }
     this.progress = next;
     if (this.pageTurn) this._renderPageTurn();
     else if (this.documentMorph) this._renderDocumentMorph();
@@ -593,7 +587,51 @@ export class ParticleExperience {
     this._sampleRounded(this.finalPoints, finalRect, finalRect.height / 2);
     this._sampleRounded(this.finalPoints, finalButton, Math.min(finalButton.width, finalButton.height) / 2);
     this._buildFlow();
-    this.chapterScatter = createChapterScatter(this.seed, w, h);
+    this._buildChapterPaths();
+  }
+
+  _buildChapterPaths() {
+    // Pair spatial neighbours instead of pairing arbitrary perimeter indices.
+    // Each map is a permutation: the complete original static design is kept.
+    const start = Math.ceil(this.count * .09);
+    const stops = [0, .35, .45, .25, .55, .25];
+    const target = [0, 0, 0, 0, 0];
+    const orders = [];
+    for (let stage = 0; stage < 6; stage++) {
+      const keys = new Uint32Array(this.count);
+      for (let i = start; i < this.count; i++) {
+        this._target(stage, i, stops[stage], target);
+        keys[i] = mortonCode(target[0], target[1], 0, 0, this.width, this.height);
+      }
+      orders.push(Array.from({ length: this.count - start }, (_, i) => i + start)
+        .sort((a, b) => keys[a] - keys[b] || a - b));
+    }
+    this.chapterMaps = orders.map(order => {
+      const map = Uint32Array.from({ length: this.count }, (_, i) => i);
+      for (let rank = 0; rank < order.length; rank++) map[orders[0][rank]] = order[rank];
+      return map;
+    });
+    this.chapterFlows = [];
+    for (let chapter = 0; chapter < 5; chapter++) {
+      const from = new Float32Array(this.count * 5), to = new Float32Array(this.count * 5);
+      for (let i = 0; i < this.count; i++) {
+        this._chapterTarget(chapter, CHAPTER_MOTION.start, i, target);
+        from.set(target, i * 5);
+        this._chapterTarget(chapter + 1, CHAPTER_MOTION.end - 1, i, target);
+        to.set(target, i * 5);
+      }
+      this.chapterFlows.push(createChapterFlow(this.seed, this.width, this.height, from, to, chapter));
+    }
+    this.previousTargets = null;
+  }
+
+  _chapterTarget(stage, local, index, out) {
+    // Replace the old entry fade / exit spiral only inside the transition.
+    // Resting stops and the raw geometry generator remain unchanged.
+    if (stage === 2) local = Math.max(.34, local);
+    if (stage === 3) local = Math.min(CHAPTER_MOTION.start, local);
+    if (stage === 4) local = Math.max(.55, local);
+    this._target(stage, this.chapterMaps[stage][index], local, out);
   }
 
   _makeTitle() {
@@ -815,19 +853,16 @@ export class ParticleExperience {
   }
 
   _sceneTarget(stage, local, index, target, next) {
-    this._target(stage, index, local, target);
-    if (this.reduced) return;
-    if (stage === 1 || stage === 2) {
-      if (local <= .50 || index < this.count * .09) return;
-      this._target(stage + 1, index, 0, next);
-      blendChapterTransition(target, next, this.chapterScatter, index, (local - .50) / .50, target);
-      return;
-    }
-    const transition = stage < 5 ? smoother(.66, 1, local) : 0;
-    if (transition > 0) {
-      this._target(stage + 1, index, 0, next);
-      for (let j = 0; j < 5; j++) target[j] += (next[j] - target[j]) * transition;
-    }
+    if (this.reduced) { this._target(stage, index, local, target); return; }
+    let chapter = stage, position = local;
+    if (stage > 0 && local < CHAPTER_MOTION.end - 1) { chapter--; position++; }
+    if (chapter < 5 && position >= CHAPTER_MOTION.start && position <= CHAPTER_MOTION.end) {
+      this._chapterTarget(chapter, CHAPTER_MOTION.start, index, target);
+      this._chapterTarget(chapter + 1, CHAPTER_MOTION.end - 1, index, next);
+      if (chapter > 0 && index < this.count * .09) return;
+      blendChapterTransition(target, next, this.chapterFlows[chapter], index,
+        (position - CHAPTER_MOTION.start) / (CHAPTER_MOTION.end - CHAPTER_MOTION.start), target);
+    } else this._chapterTarget(stage, local, index, target);
   }
 
   frame(now) {
@@ -859,6 +894,8 @@ export class ParticleExperience {
     this.focusAmount += (this.focusTarget - this.focusAmount) * (1 - Math.exp(-.12 * delta));
     const target = [0, 0, 0, 0, 0];
     const next = [0, 0, 0, 0, 0];
+    const previous = this.previousTargets;
+    if (!previous) this.previousTargets = new Float32Array(this.count * 2);
     this.waves = this.waves.filter(wave => this.time - wave.start < 1800);
     for (let i = 0; i < this.count; i += 1) {
       const q = i * 4;
@@ -867,8 +904,12 @@ export class ParticleExperience {
         this.xyz[q] = target[0];
         this.xyz[q + 1] = target[1];
       }
-      let x = this.xyz[q];
-      let y = this.xyz[q + 1];
+      // Advect the rendered particles with their path; spring only the pointer
+      // disturbance. A second position spring would drag old outlines behind it.
+      let x = previous ? this.xyz[q] + target[0] - previous[i * 2] : target[0];
+      let y = previous ? this.xyz[q + 1] + target[1] - previous[i * 2 + 1] : target[1];
+      this.previousTargets[i * 2] = target[0];
+      this.previousTargets[i * 2 + 1] = target[1];
       let vx = this.xyz[q + 2];
       let vy = this.xyz[q + 3];
       const pointerX = x - this.pointer.x;
@@ -929,10 +970,7 @@ export class ParticleExperience {
     this.buffer[offset + 3] = mix(baseR, accentR, warm);
     this.buffer[offset + 4] = mix(baseG, accentG, warm);
     this.buffer[offset + 5] = mix(baseB, accentB, warm);
-    const reverseArrival = this.progress >= 1 && this.progress < 2 && this.time < this.reverseArrivalUntil;
-    const arriving = !this.reduced && ((this.progress >= 2 && this.progress < 3.5) || reverseArrival) && index >= this.count * .09;
-    const arrival = arriving ? chapterArrivalScale(x - target[0], y - target[1], this.seed[index * 4 + 3], this.mobile) : 1;
-    this.buffer[offset + 6] = target[3] * arrival;
+    this.buffer[offset + 6] = target[3];
   }
 
   _prepareGlyphTargets(glyphs, sourcePositions = null) {
@@ -1259,6 +1297,7 @@ export class ParticleExperience {
 
   _snapToTargets(draw = true) {
     if (!this.xyz) return;
+    this.previousTargets = null;
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
     const target = [0, 0, 0, 0, 0];

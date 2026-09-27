@@ -1,5 +1,6 @@
 import { ParticleExperience } from './particles.js';
 import { createArticleReader } from './article-reader.js';
+import { stepChapterProgress } from './chapter-transition.js';
 
 const root = document.documentElement;
 const canvas = document.querySelector('#story-particles');
@@ -12,8 +13,9 @@ const stops = [0, 1.35, 2.45, 3.25, 4.55, 5.25];
 const end = 5.82;
 let experience, enhanced = false, progress = 0, current = 0, scheduled = false;
 let resizing = 0, hashTimer = 0, pendingFocus = null, ready = false;
-let resizeProgress = 0, resizeDestination = null;
+let resizeProgress = 0, resizeDestination = null, scrollDestination = 0;
 let reader, suspended = false;
+let lastPresentation = 0;
 const homePath = location.pathname;
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
@@ -34,11 +36,14 @@ const layout = () => ({
 });
 const hashScene = () => panels.findIndex(panel => '#' + panel.id === location.hash);
 
-function update() {
+function update(now = performance.now(), snap = false) {
   scheduled = false;
   if (!enhanced || suspended || resizing) return;
-  resizeDestination = null;
-  progress = clamp(scrollY / maxScroll() * end, 0, end);
+  const destination = clamp(scrollY / maxScroll() * end, 0, end);
+  scrollDestination = destination;
+  const elapsed = lastPresentation ? now - lastPresentation : 16.667;
+  lastPresentation = now;
+  progress = snap || !ready || motion.matches ? destination : stepChapterProgress(progress, destination, elapsed);
   const scene = Math.min(panels.length - 1, Math.floor(progress));
   const local = progress - scene;
   const arrival = scene === 0 ? 1 : smooth(0, .16, local);
@@ -83,6 +88,9 @@ function update() {
   }
   experience.setProgress(motion.matches ? (scene === 0 ? 0 : stops[scene]) : progress);
   ready = true;
+  if (progress !== destination) { requestUpdate(); return; }
+  resizeDestination = null;
+  lastPresentation = 0;
   clearTimeout(hashTimer);
   hashTimer = setTimeout(() => {
     if (!enhanced || suspended || location.pathname !== homePath) return;
@@ -134,7 +142,7 @@ function enhance() {
   window.history.scrollRestoration = 'manual';
   experience.resize(layout());
   scrollTo({ top: maxScroll() * progress / end, behavior: 'instant' });
-  update();
+  update(performance.now(), true);
 }
 
 async function initialize() {
@@ -171,7 +179,7 @@ async function initialize() {
         if (experience.metrics.renderer === 'static') { current = scene; fallback(); return; }
         experience.resize(layout());
         scrollTo({ top: maxScroll() * destination / end, behavior: 'instant' });
-        update();
+        update(performance.now(), true);
       },
     });
 
@@ -195,7 +203,7 @@ async function initialize() {
       // Resize can clamp scrollY before its scroll event arrives. Keep the last
       // scene position until layout is rebuilt instead of treating that as input.
       clearTimeout(hashTimer);
-      if (!resizing) resizeProgress = progress;
+      if (!resizing) resizeProgress = scrollDestination;
       clearTimeout(resizing);
       resizing = setTimeout(() => {
         resizing = 0;
@@ -205,7 +213,7 @@ async function initialize() {
         if (reader.active) { experience.resize(layout()); reader.resize(); return; }
         experience.resize(layout());
         scrollTo({ top: maxScroll() * destination / end, behavior: 'instant' });
-        update();
+        update(performance.now(), true);
       }, 140);
     });
     document.fonts.ready.then(() => { if (enhanced) { experience.resize(layout()); if (reader.active) reader.resize(); else update(); } });
