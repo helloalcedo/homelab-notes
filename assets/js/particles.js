@@ -1,7 +1,7 @@
 import { READER_MOTION, smoother } from './reader-motion.js';
 import { TAU, clamp01, ease, flightOffset, mix, randomGenerator, rankMatch } from './morph.js';
 import { buildStory } from './scenes/story.js';
-import { buildKingfisher, composition } from './scenes/kingfisher.js';
+import { buildCompanion, buildSurface, surfaceLayout } from './scenes/kingfisher.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 const smooth = (from, to, value) => {
@@ -15,9 +15,9 @@ const PALETTES = {
   paper: [[0.141, 0.141, 0.125], [0.6, 0.318, 0.224], [0.067, 0.463, 0.604], [0.39, 0.38, 0.345], [0.56, 0.545, 0.5], [0.4, 0.3, 0.22]],
 };
 const DUST_SHARE = 0.09;
+const BIRD_SHARE = 0.14;
 const TRANSITION_START = 0.72;
 const MAX_DELAY = 0.3;
-const DIVE_START = 0.45;
 const SIZE = 1.5;
 
 function copyRect(rect, canvasRect) {
@@ -55,9 +55,10 @@ function mortonCode(x, y, minX, minY, spanX, spanY) {
 }
 
 /**
- * One persistent particle pool that draws every visual on the home page: the perched
- * kingfisher, its dive, and the five chapters below the surface. Scene modules supply
- * poses; this engine owns slots, transitions, interaction, rendering and the reader morphs.
+ * One persistent particle pool that draws every visual on the home page: the Alcedo title
+ * over its pond, the five chapters below the surface, and the companion kingfisher that
+ * follows the reader through them. Scene modules supply poses; this engine owns slots,
+ * transitions, interaction, rendering and the reader morphs.
  */
 export class ParticleExperience {
   constructor(canvas, { scenes = true } = {}) {
@@ -135,11 +136,6 @@ export class ParticleExperience {
         to: this.pageTurn.toGlyphCount || 0,
       } : null,
     };
-  }
-
-  /** Scene anchors for the controller: where the bird enters the water, and the depth. */
-  get story() {
-    return this.king ? { entry: this.king.layout.entry, impact: this.king.impact, waterY: this.king.layout.waterY } : null;
   }
 
   resize(layout = this.rawLayout || {}) {
@@ -532,6 +528,9 @@ export class ParticleExperience {
     const desired = usesWebGLPool ? (this.mobile ? 10000 : 19000) : 1800;
     this.count = desired;
     this.dustCount = Math.floor(desired * DUST_SHARE);
+    // The companion kingfisher keeps its own particles; the rest draw the chapters.
+    this.birdCount = Math.max(360, Math.min(3000, Math.round(desired * BIRD_SHARE)));
+    this.sceneStart = this.dustCount + this.birdCount;
     this.xyz = new Float32Array(desired * 4);
     this.disp = new Float32Array(desired * 4);
     this.seed = new Float32Array(desired * 4);
@@ -549,28 +548,39 @@ export class ParticleExperience {
   _buildGeometry() {
     if (!this.useScenes) {
       this.scenes = null;
+      this.companion = null;
       return;
     }
     const w = this.width;
     const h = this.height;
     const mobile = this.mobile;
-    const particles = this.count - this.dustCount;
-    const surface = composition({ w, h, mobile });
-    const story = buildStory({ w, h, mobile, layout: this.layout, particles, rootX: surface.entry.x });
-    this.king = buildKingfisher({ w, h, mobile, particles, tree: story.tree, sceneOne: story.scenes[0] });
-    this.scenes = [this.king.scene, ...story.scenes];
+    const particles = this.count - this.sceneStart;
+    this.surface = surfaceLayout({ w, h, mobile });
+    const story = buildStory({ w, h, mobile, layout: this.layout, particles });
+    this.scenes = [buildSurface({ w, h, mobile, particles, surface: this.surface }), ...story.scenes];
+    const { root, rootRing, result } = story.anchors;
+    const widget = this.layout.widget;
+    const note = this.layout.notes?.[1] || this.layout.notes?.[0];
+    const perches = [
+      { feet: this.surface.feet, facing: 1 },
+      { feet: { x: root.x, y: root.y - rootRing - 1 }, facing: mobile ? -1 : 1 },
+      widget ? { feet: { x: widget.x + widget.width * 0.74, y: widget.y - 1 }, facing: 1 } : { feet: { x: w * 0.8, y: h * 0.3 }, facing: 1 },
+      note ? { feet: { x: note.x + note.width * 0.52, y: note.y - 1 }, facing: 1 } : { feet: { x: w * 0.8, y: h * 0.35 }, facing: 1 },
+      { feet: { x: result.x, y: result.y - result.r - 1 }, facing: 1 },
+    ];
+    this.companion = buildCompanion({ w, h, mobile, count: this.birdCount, surface: this.surface, perches, pill: this.layout.final });
     this._assignSlots();
   }
 
   /**
-   * Give every particle one slot per scene. Scene 00 slots are an even shuffle; scene 01
-   * follows the dive's body-to-branch order; later scenes are rank-matched to the previous
-   * scene's rest positions so each transition keeps neighbours together.
+   * Give every chapter particle one slot per scene. Scene 00 slots are an even shuffle;
+   * each later scene is rank-matched to the previous scene's rest positions so every
+   * transition keeps neighbours together.
    */
   _assignSlots() {
     const n = this.count;
-    const dust = this.dustCount;
-    const m = n - dust;
+    const first = this.sceneStart;
+    const m = n - first;
     const ctx = this.ctx;
     const saved = ctx.time;
     ctx.time = 0;
@@ -582,19 +592,13 @@ export class ParticleExperience {
       const j = Math.floor(random() * (k + 1));
       [order[k], order[j]] = [order[j], order[k]];
     }
-    let others = 0;
-    for (let j = 0; j < m; j += 1) {
-      const i = dust + j;
-      const f0 = (order[j] + 0.5) / m;
-      this.slots[0][i] = f0;
-      this.slots[1][i] = this.king.targetFor(f0, f0 >= this.king.birdSpan ? others++ : 0);
-    }
+    for (let j = 0; j < m; j += 1) this.slots[0][first + j] = (order[j] + 0.5) / m;
     const source = new Float32Array(m * 2);
     const destination = new Float32Array(m * 2);
     const out = this._o;
-    for (let scene = 2; scene <= 5; scene += 1) {
+    for (let scene = 1; scene <= 5; scene += 1) {
       for (let j = 0; j < m; j += 1) {
-        const i = dust + j;
+        const i = first + j;
         this.scenes[scene - 1].pose(this.slots[scene - 1][i], i, 0.5, ctx, out, true);
         source[j * 2] = out[0];
         source[j * 2 + 1] = out[1];
@@ -603,7 +607,7 @@ export class ParticleExperience {
         destination[j * 2 + 1] = out[1];
       }
       const match = rankMatch(source, destination, m);
-      for (let j = 0; j < m; j += 1) this.slots[scene][dust + j] = (match[j] + 0.5) / m;
+      for (let j = 0; j < m; j += 1) this.slots[scene][first + j] = (match[j] + 0.5) / m;
       // Particles leading in the direction of travel leave first: a wave, not a swap.
       let sx = 0;
       let sy = 0;
@@ -631,7 +635,7 @@ export class ParticleExperience {
       const delays = this.delays[scene - 1];
       for (let j = 0; j < m; j += 1) {
         const lead = 1 - (projection[j] - min) / span;
-        delays[dust + j] = MAX_DELAY * clamp(lead * 0.78 + this.seed[(dust + j) * 4 + 1] * 0.22);
+        delays[first + j] = MAX_DELAY * clamp(lead * 0.78 + this.seed[(first + j) * 4 + 1] * 0.22);
       }
     }
     ctx.time = saved;
@@ -663,15 +667,13 @@ export class ParticleExperience {
       this._dust(i, out);
       return;
     }
-    const a = this._a;
-    this.scenes[stage].pose(this.slots[stage][i], i, local, ctx, a);
-    if (stage === 0 && local > DIVE_START) {
-      const b = this._b;
-      this.scenes[1].pose(this.slots[1][i], i, 0, ctx, b);
-      this.king.dive(this.slots[0][i], i, local, ctx, a, b, out);
+    if (i < this.sceneStart) {
+      this.companion.pose(i - this.dustCount, i, ctx, out);
       return;
     }
-    if (stage > 0 && stage < 5 && local > TRANSITION_START) {
+    const a = this._a;
+    this.scenes[stage].pose(this.slots[stage][i], i, local, ctx, a);
+    if (stage < 5 && local > TRANSITION_START) {
       const b = this._b;
       this.scenes[stage + 1].pose(this.slots[stage + 1][i], i, 0, ctx, b);
       const u = (local - TRANSITION_START) / (1 - TRANSITION_START);
@@ -685,22 +687,32 @@ export class ParticleExperience {
     for (let k = 0; k < 7; k += 1) out[k] = a[k];
   }
 
-  /** Marine snow: faint drifting motes that rise past the camera as it descends. */
+  /** Marine snow: faint drifting motes that rise slowly as the reader goes deeper. */
   _dust(i, out) {
     const q = i * 4;
     const s = this.seed;
     const w = this.width;
     const h = this.height;
     const time = this.reduced ? 0 : this.time;
-    const depth = this.king ? (this.progress < 1 ? this.king.camera(this.progress) : this.king.cameraDepth + (this.progress - 1) * h * 0.14) : 0;
+    const depth = this.progress * h * 0.12;
     out[0] = ((s[q] * w + time * 0.003 * (s[q + 1] - 0.4)) % w + w) % w;
-    out[1] = ((s[q + 2] * h + Math.sin(time * 0.0001 + s[q] * 10) * 12 - time * 0.0016 * (0.3 + s[q + 3]) - depth * 0.45) % h + h) % h;
+    out[1] = ((s[q + 2] * h + Math.sin(time * 0.0001 + s[q] * 10) * 12 - time * 0.0016 * (0.3 + s[q + 3]) - depth) % h + h) % h;
     out[2] = 0.45 + s[q + 3] * 0.6;
     const colour = this.ctx.palette[0];
     out[3] = colour[0];
     out[4] = colour[1];
     out[5] = colour[2];
     out[6] = 0.035 + s[q + 3] * 0.075;
+  }
+
+  /** Per-frame setup shared by the animated and the static paths. */
+  _prepare(stage, local) {
+    if (!this.scenes) return;
+    this.scenes[stage].prepare?.(this.ctx);
+    this.companion.prepare(this.progress, this.ctx.time);
+    this.reflection = stage === 0
+      ? { waterY: this.surface.waterY, alpha: 1 - smooth(TRANSITION_START, 0.92, local) }
+      : { waterY: 0, alpha: 0 };
   }
 
   _update(delta) {
@@ -711,10 +723,7 @@ export class ParticleExperience {
     for (const name in this.highlight) {
       this.highlight[name] += (this.highlightTarget[name] - this.highlight[name]) * Math.min(1, 0.12 * delta);
     }
-    if (this.scenes) {
-      this.scenes[stage].prepare?.(ctx);
-      this.reflection = stage === 0 ? this.king.reflection(local) : { waterY: 0, alpha: 0 };
-    }
+    this._prepare(stage, local);
     this.waves = this.waves.filter(wave => this.time - wave.start < 1800);
     const out = this._o;
     const pointerRadius = this.mobile ? 62 : 95;
@@ -1131,10 +1140,7 @@ export class ParticleExperience {
     const saved = this.time;
     if (this.reduced) this.time = 0;
     ctx.time = this.time;
-    if (this.scenes) {
-      this.scenes[stage].prepare?.(ctx);
-      this.reflection = stage === 0 ? this.king.reflection(local) : { waterY: 0, alpha: 0 };
-    }
+    this._prepare(stage, local);
     const out = this._o;
     for (let i = 0; i < this.count; i += 1) {
       this._pose(i, stage, local, out);

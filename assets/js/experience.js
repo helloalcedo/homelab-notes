@@ -59,7 +59,9 @@ function apply(value) {
   }
   root.dataset.scene = String(scene);
   panels.forEach((panel, index) => {
-    const enter = index === 0 ? 1 : (motion.matches ? Number(index === scene) : smoother(index - 0.1, index + 0.12, value));
+    // The finale waits for the kingfisher to dive into the search pill before it appears.
+    const last = index === panels.length - 1;
+    const enter = index === 0 ? 1 : (motion.matches ? Number(index === scene) : smoother(index - (last ? -0.01 : 0.1), index + (last ? 0.17 : 0.12), value));
     const exit = index === panels.length - 1 ? 0 : (motion.matches ? Number(index !== scene) : smoother(index + 0.66, index + 0.82, value));
     const visible = enter > 0.001 && exit < 0.999;
     const accessible = index === scene;

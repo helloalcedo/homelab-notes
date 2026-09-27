@@ -78,11 +78,11 @@ const centre = rect => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 
 
 // ---------------------------------------------------------------- 01 network
 
-export function buildTree({ w, h, mobile, rootX }) {
+export function buildTree({ w, h, mobile }) {
   const random = randomGenerator(5501);
   const edges = [];
   const nodes = [];
-  const startX = rootX ?? (mobile ? w * 0.1 : w * 0.455);
+  const startX = mobile ? w * 0.1 : w * 0.455;
   const endX = w * 0.91;
   const centerY = mobile ? h * 0.66 : h * 0.515;
   const spread = mobile ? h * 0.2 : h * 0.325;
@@ -369,7 +369,8 @@ function notesScene(layout, { w, h, mobile }) {
 
 // ---------------------------------------------------------------- 04 publishing flow
 
-function flowScene(layout, { w, h, mobile }) {
+/** The five publishing-flow nodes: centres measured from the DOM labels, with radii. */
+function flowNodes(layout, { w, h, mobile }) {
   const compact = mobile && h <= 650;
   const anchors = layout.nodes?.length === 5 ? layout.nodes.map(centre) : (() => {
     const centerY = mobile ? h * (compact ? 0.64 : 0.67) : h * 0.51;
@@ -380,7 +381,10 @@ function flowScene(layout, { w, h, mobile }) {
     return [{ x: left, y: centerY }, ...rows.map(y => ({ x: middle, y })), { x: right, y: centerY }];
   })();
   const radii = [mobile ? 12 : 18, mobile ? 13 : 21, mobile ? 13 : 21, mobile ? 13 : 21, mobile ? 14 : 18];
-  const nodes = anchors.map((point, index) => ({ ...point, r: radii[index] }));
+  return anchors.map((point, index) => ({ ...point, r: radii[index] }));
+}
+
+function flowScene(nodes) {
   const stroke = new Stroke();
   nodes.forEach(node => stroke.circle(node.x, node.y, node.r, { alpha: 0.86 }));
   const [source, hugo, velog, github, result] = nodes;
@@ -492,18 +496,21 @@ function searchScene(layout, { w, h, mobile }) {
 }
 
 /** Build scenes 01–05 for the current viewport and DOM layout. */
-export function buildStory({ w, h, mobile, layout, particles, rootX }) {
+export function buildStory({ w, h, mobile, layout, particles }) {
   const context = { w, h, mobile };
-  const tree = buildTree({ w, h, mobile, rootX });
+  const tree = buildTree({ w, h, mobile });
+  const nodes = flowNodes(layout, context);
   const scenes = [
     makeScene(treeScene(tree, context), particles),
     makeScene(widgetScene(layout, context), particles),
     makeScene(notesScene(layout, context), particles),
-    makeScene(flowScene(layout, context), particles),
+    makeScene(flowScene(nodes), particles),
     makeScene(searchScene(layout, context), particles),
   ];
   const edgeSpan = scenes[0].groups[0].span;
   /** Fraction within the tree's edge group, or −1 for node rings and the pulse. */
   scenes[0].edgeFraction = fraction => (fraction < edgeSpan ? fraction / edgeSpan : -1);
-  return { tree, scenes };
+  // Perches for the companion kingfisher: the network's root ring and the record node.
+  const anchors = { root: tree.root, rootRing: mobile ? 4.2 : 5.5, result: nodes[4] };
+  return { tree, scenes, anchors };
 }
