@@ -22,6 +22,7 @@ function copyRect(rect, canvasRect) {
     y: (rect.y ?? rect.top) - canvasRect.top,
     width: rect.width,
     height: rect.height,
+    headerOffset: rect.headerOffset,
   };
 }
 
@@ -69,6 +70,9 @@ export class ParticleExperience {
     this.theme = 'ink';
     this.reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.pointer = { x: -2000, y: -2000 };
+    this.focusFrame = null;
+    this.focusAmount = 0;
+    this.focusTarget = 0;
     this.waves = [];
     this.time = 0;
     this.last = performance.now();
@@ -122,6 +126,7 @@ export class ParticleExperience {
       running: Boolean(this.raf),
       reduced: this.reduced,
       fps: this.fps,
+      focusedFrame: Boolean(this.focusTarget),
       poolVersion: this.poolVersion,
       documentMorph: this.documentMorph ? this.documentMorph.amount : null,
       pageTurn: this.pageTurn ? this.pageTurn.amount : null,
@@ -243,10 +248,21 @@ export class ParticleExperience {
     return this;
   }
 
+  setFrameFocus(rect) {
+    const next = rect ? copyRect(rect, this.canvas.getBoundingClientRect()) : null;
+    const target = next ? 1 : 0;
+    if (this.focusTarget === target && (!next || ['x', 'y', 'width', 'height'].every(key => next[key] === this.focusFrame?.[key]))) return this;
+    if (next) this.focusFrame = next;
+    this.focusTarget = target;
+    if (this.reduced) { this.focusAmount = this.focusTarget; this._renderStatic(); }
+    else this._wake();
+    return this;
+  }
+
   clearPointer() {
     this.pointer.x = -2000;
     this.pointer.y = -2000;
-    if (!this.reduced) this._wake();
+    this.setFrameFocus(null);
     return this;
   }
 
@@ -541,9 +557,11 @@ export class ParticleExperience {
     const code = this.layout.code || { x: w * 0.08, y: h * 0.34, width: w * 0.34, height: h * 0.36 };
     const headerOffset = this.mobile ? 30 : 44;
     this._sampleRounded(this.projectPoints, project, 16);
-    this._sampleLine(this.projectPoints, project.x + 14, project.y + headerOffset, project.x + project.width - 14, project.y + headerOffset, 520);
+    const projectHeader = project.y + (project.headerOffset ?? headerOffset);
+    this._sampleLine(this.projectPoints, project.x + 14, projectHeader, project.x + project.width - 14, projectHeader, 520);
     this._sampleRounded(this.projectPoints, code, 10);
-    this._sampleLine(this.projectPoints, code.x + 14, code.y + headerOffset, code.x + code.width - 14, code.y + headerOffset, 420);
+    const codeHeader = code.y + (code.headerOffset ?? headerOffset);
+    this._sampleLine(this.projectPoints, code.x + 14, codeHeader, code.x + code.width - 14, codeHeader, 420);
 
     const notes = this.layout.notes.length ? this.layout.notes : [
       { x: w * 0.16, y: h * 0.28, width: w * 0.28, height: h * 0.46 },
@@ -551,7 +569,8 @@ export class ParticleExperience {
     ];
     for (const note of notes.slice(0, 2)) {
       this._sampleRounded(this.notePoints, note, 5);
-      this._sampleLine(this.notePoints, note.x + 14, note.y + headerOffset, note.x + note.width - 14, note.y + headerOffset, 360);
+      const noteHeader = note.y + (note.headerOffset ?? headerOffset);
+      this._sampleLine(this.notePoints, note.x + 14, noteHeader, note.x + note.width - 14, noteHeader, 360);
       const fold = Math.min(20, note.width * 0.12, note.height * 0.12);
       this._sampleLine(this.notePoints, note.x + note.width - fold, note.y, note.x + note.width, note.y + fold, 90);
     }
@@ -627,7 +646,7 @@ export class ParticleExperience {
   _buildFlow() {
     const w = this.width;
     const h = this.height;
-    const compact = this.mobile && h <= 650;
+    const compact = this.mobile && h <= 800;
     const centerY = this.mobile ? h * (compact ? 0.64 : 0.67) : h * 0.51;
     const left = this.mobile ? w * 0.12 : w * 0.47;
     const middle = this.mobile ? w * 0.51 : w * 0.68;
@@ -689,7 +708,7 @@ export class ParticleExperience {
     if (stage > 0 && index < this.count * 0.09) {
       out[0] = ((a * w + this.time * 0.003 * (b - 0.4)) % w + w) % w;
       out[1] = ((c * h + Math.sin(this.time * 0.0001 + a * 10) * 12) % h + h) % h;
-      out[3] = 0.035 + d * 0.075;
+      out[3] = 0.025 + d * 0.045;
       out[4] = 0.4 + d * 0.6;
       return;
     }
@@ -808,7 +827,12 @@ export class ParticleExperience {
   _update(delta) {
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
-    const transition = stage < 5 ? smooth(0.81, 1, local) : 0;
+    const transition = stage < 5 ? smoother(0.66, 1, local) : 0;
+    // An exact critically damped spring settles without bouncing, including
+    // when frame intervals change. Pointer impulses share the same recovery.
+    const frequency = .19;
+    const decay = Math.exp(-frequency * delta);
+    this.focusAmount += (this.focusTarget - this.focusAmount) * (1 - Math.exp(-.12 * delta));
     const target = [0, 0, 0, 0, 0];
     const next = [0, 0, 0, 0, 0];
     this.waves = this.waves.filter(wave => this.time - wave.start < 1800);
@@ -831,7 +855,9 @@ export class ParticleExperience {
       const pointerY = y - this.pointer.y;
       const pointerDistance = Math.hypot(pointerX, pointerY);
       const pointerRadius = this.mobile ? 62 : 95;
-      if (pointerDistance < pointerRadius && pointerDistance > 0.1) {
+      // Interactive frames must keep matching their real links and inputs.
+      // Free-form scenes retain the tactile repulsion; frames use ink tint.
+      if ((stage === 0 || stage === 1 || stage === 4) && pointerDistance < pointerRadius && pointerDistance > 0.1) {
         const force = (1 - pointerDistance / pointerRadius) * 2.1;
         vx += (pointerX / pointerDistance) * force;
         vy += (pointerY / pointerDistance) * force;
@@ -848,10 +874,13 @@ export class ParticleExperience {
           vy += (dy / distance) * force;
         }
       }
-      vx = (vx + (target[0] - x) * 0.032 * delta) * Math.pow(0.79, delta);
-      vy = (vy + (target[1] - y) * 0.032 * delta) * Math.pow(0.79, delta);
-      x += vx * delta;
-      y += vy * delta;
+      const offsetX = x - target[0], offsetY = y - target[1];
+      const stepX = (vx + frequency * offsetX) * delta;
+      const stepY = (vy + frequency * offsetY) * delta;
+      x = target[0] + (offsetX + stepX) * decay;
+      y = target[1] + (offsetY + stepY) * decay;
+      vx = (vx - frequency * stepX) * decay;
+      vy = (vy - frequency * stepY) * decay;
       this.xyz[q] = x;
       this.xyz[q + 1] = y;
       this.xyz[q + 2] = vx;
@@ -870,7 +899,10 @@ export class ParticleExperience {
     const accentR = ink ? 0.89 : 0.63;
     const accentG = ink ? 0.53 : 0.25;
     const accentB = ink ? 0.38 : 0.17;
-    const warm = clamp(target[2]);
+    const frame = this.focusFrame;
+    const inFrame = frame && target[0] >= frame.x - 3 && target[0] <= frame.x + frame.width + 3
+      && target[1] >= frame.y - 3 && target[1] <= frame.y + frame.height + 3;
+    const warm = clamp(target[2] + (inFrame ? this.focusAmount * .85 : 0));
     this.buffer[offset] = x;
     this.buffer[offset + 1] = y;
     this.buffer[offset + 2] = target[4] * 1.6;
@@ -1206,7 +1238,7 @@ export class ParticleExperience {
     if (!this.xyz) return;
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
-    const transition = stage < 5 ? smooth(0.81, 1, local) : 0;
+    const transition = stage < 5 ? smoother(0.66, 1, local) : 0;
     const target = [0, 0, 0, 0, 0];
     const next = [0, 0, 0, 0, 0];
     for (let i = 0; i < this.count; i += 1) {

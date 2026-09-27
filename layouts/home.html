@@ -1,8 +1,9 @@
 {{ define "main" }}
 <canvas id="story-particles" aria-hidden="true"></canvas>
 <nav id="story-navigation" class="story-navigation" aria-label="장면 선택" tabindex="-1">
+  <span class="scene-name" aria-hidden="true"></span>
   {{ range $i, $scene := slice (dict "id" "intro" "name" "Alcedo") (dict "id" "lab" "name" "홈랩") (dict "id" "work" "name" "프로젝트") (dict "id" "notes" "name" "노트") (dict "id" "stories" "name" "발행") (dict "id" "explore" "name" "기록 찾기") }}
-  <a href="#{{ $scene.id }}" data-scene="{{ $i }}" aria-label="{{ printf "%02d" $i }} {{ $scene.name }}"{{ if eq $i 0 }} aria-current="step"{{ end }}><span>{{ printf "%02d" $i }}</span><i></i></a>
+  <a href="#{{ $scene.id }}" data-scene="{{ $i }}" data-scene-name="{{ $scene.name }}" aria-label="{{ printf "%02d" $i }} {{ $scene.name }}"{{ if eq $i 0 }} aria-current="step"{{ end }}><span>{{ printf "%02d" $i }}</span><i></i></a>
   {{ end }}
 </nav>
 <div class="particle-story">
@@ -15,12 +16,12 @@
     <div class="scene-copy"><p class="scene-eyebrow">02 — PROJECTS</p><h2 id="work-title">생각은 코드로,<br>코드는 동작으로.</h2><p class="scene-description">만드는 과정과 선택한 이유,<br>실제로 확인한 결과까지.</p><a class="scene-link" href="{{ "projects/" | relURL }}">프로젝트 모아 보기 {{ partial "arrow.html" . }}</a></div>
     <div class="particle-code" data-particle-code aria-label="이 사이트의 Hugo 설정 예시"><span class="frame-label">hugo.toml</span><pre><code><span class="code-muted"># Homelab Notes</span>
 title = <span class="code-accent">'Homelab Notes'</span>
-locale = <span class="code-accent">'ko-KR'</span>
+locale = <span class="code-accent">'ko-KR'</span><span class="code-secondary">
 
 [params]
   author = <span class="code-accent">'Alcedo'</span>
 
-<span class="code-muted"># Build → Verify → Deploy</span></code></pre></div>
+<span class="code-muted"># Build → Verify → Deploy</span></span></code></pre></div>
     {{ range first 1 (where site.RegularPages "Section" "projects").ByDate.Reverse }}
     <article class="particle-project" data-particle-project data-reader-frame><div class="frame-label"><span>SELECTED PROJECT</span><span>{{ .Params.period }}</span></div><h3>{{ .Title }}</h3><p>{{ .Params.summary }}</p><div class="project-scene-links"><a data-reader-link href="{{ .RelPermalink }}">기록 읽기 {{ partial "arrow.html" . }}</a>{{ with .Params.repository }}<a href="{{ . }}">소스 {{ partial "diagonal-arrow.html" $ }}</a>{{ end }}</div></article>
     {{ end }}

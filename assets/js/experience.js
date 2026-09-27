@@ -23,7 +23,9 @@ const rect = selector => {
   const element = typeof selector === 'string' ? document.querySelector(selector) : selector;
   if (!element) return null;
   const box = element.getBoundingClientRect();
-  return { x: box.x, y: box.y, width: box.width, height: box.height };
+  const label = element.querySelector('.frame-label');
+  return { x: box.x, y: box.y, width: box.width, height: box.height,
+    headerOffset: label ? label.getBoundingClientRect().bottom - box.top + 9 : undefined };
 };
 const layout = () => ({
   code: rect('[data-particle-code]'), project: rect('[data-particle-project]'),
@@ -39,7 +41,9 @@ function update() {
   progress = clamp(scrollY / maxScroll() * end, 0, end);
   const scene = Math.min(panels.length - 1, Math.floor(progress));
   const local = progress - scene;
-  const opacity = motion.matches || scene === 5 ? 1 : 1 - smooth(.77, .98, local);
+  const arrival = scene === 0 ? 1 : smooth(0, .16, local);
+  const departure = scene === 5 ? 1 : 1 - smooth(.64, .96, local);
+  const opacity = motion.matches ? 1 : arrival * departure;
   const intro = progress < .06;
   if (intro && (header.contains(document.activeElement) || navigation.contains(document.activeElement))) {
     const title = panels[0].querySelector('h1');
@@ -62,10 +66,12 @@ function update() {
     }
     panel.classList.toggle('is-active', active);
     panel.style.opacity = active ? opacity : 0;
+    panel.style.setProperty('--copy-offset', `${motion.matches ? 0 : (1 - arrival) * 14 - (1 - departure) * 8}px`);
     panel.inert = !accessible;
     panel.setAttribute('aria-hidden', String(!accessible));
   });
   if (current !== scene || !ready) {
+    experience.setFrameFocus(null);
     current = scene;
     chapters.forEach((link, index) => index === scene ? link.setAttribute('aria-current', 'step') : link.removeAttribute('aria-current'));
   }
@@ -115,6 +121,7 @@ function fallback() {
     panel.inert = false;
     panel.removeAttribute('aria-hidden');
     panel.style.removeProperty('opacity');
+    panel.style.removeProperty('--copy-offset');
     panel.classList.remove('is-active');
   });
   panels[current]?.scrollIntoView({ behavior: 'instant' });
@@ -173,6 +180,14 @@ async function initialize() {
       event.preventDefault();
       goToScene(Number(link.dataset.scene), { focus: event.detail === 0 });
     }));
+    // One quiet caption above the rail keeps labels clear of the note sheets.
+    const updateNavigationLabel = () => {
+      const link = navigation.querySelector('a:focus-visible') || navigation.querySelector('a:hover');
+      navigation.querySelector('.scene-name').textContent = link?.dataset.sceneName || '';
+      navigation.classList.toggle('is-labelled', Boolean(link));
+    };
+    for (const event of ['pointerover', 'pointerleave', 'focusin']) navigation.addEventListener(event, updateNavigationLabel);
+    navigation.addEventListener('focusout', () => requestAnimationFrame(updateNavigationLabel));
     addEventListener('scroll', requestUpdate, { passive: true });
     addEventListener('hashchange', () => { if (reader.active || reader.loading || location.pathname !== homePath) return; const scene = hashScene(); if (scene >= 0) goToScene(scene, { history: false, instant: true }); });
     addEventListener('popstate', () => { if (reader.active || reader.loading || location.pathname !== homePath) return; const scene = hashScene(); goToScene(scene >= 0 ? scene : 0, { history: false, instant: true }); });
@@ -206,8 +221,16 @@ async function initialize() {
     });
     addEventListener('pointermove', event => {
       if (suspended || event.pointerType === 'touch' || document.querySelector('dialog[open]')) return;
-      experience.setPointer(event.clientX, event.clientY);
+      const frame = event.target.closest('[data-reader-frame]');
+      if (frame) experience.setPointer(-2000, -2000);
+      else experience.setPointer(event.clientX, event.clientY);
+      experience.setFrameFocus(frame ? rect(frame) : null);
     }, { passive: true });
+    addEventListener('focusin', event => {
+      if (suspended) return;
+      const frame = event.target.closest('[data-reader-frame]');
+      experience.setFrameFocus(frame ? rect(frame) : null);
+    });
     addEventListener('pointerout', event => { if (!event.relatedTarget) experience.clearPointer(); }, { passive: true });
     addEventListener('pointerdown', event => {
       if (suspended || event.button !== 0 || event.target.closest('a,button,input,dialog')) return;
@@ -217,7 +240,7 @@ async function initialize() {
     addEventListener('keydown', event => {
       if (!enhanced || suspended || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || document.querySelector('dialog[open]')) return;
       if (event.target.isContentEditable || event.target.closest('input,textarea,select,button,a')) return;
-      const destination = { ArrowDown: current + 1, PageDown: current + 1, ArrowUp: current - 1, PageUp: current - 1, Home: 0, End: 5 }[event.key];
+      const destination = { ArrowDown: current + 1, PageDown: current + 1, ArrowUp: current - 1, PageUp: current - 1, Home: 0, End: panels.length - 1 }[event.key];
       if (destination === undefined) return;
       event.preventDefault();
       goToScene(destination, { focus: true });

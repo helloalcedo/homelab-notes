@@ -164,4 +164,117 @@
   document.addEventListener('articlemounted', event => {
     if (event.detail instanceof HTMLElement) enhanceArticle(event.detail);
   });
+
+  (() => {
+    let article;
+    let scroller;
+    let links = [];
+    let headings = [];
+    let frame = 0;
+
+    const progress = document.createElement('div');
+    progress.className = 'reading-progress';
+    progress.hidden = true;
+    progress.setAttribute('role', 'progressbar');
+    progress.setAttribute('aria-label', '글 읽기 진행률');
+    progress.setAttribute('aria-valuemin', '0');
+    progress.setAttribute('aria-valuemax', '100');
+    const progressValue = document.createElement('span');
+    progress.append(progressValue);
+    document.body.append(progress);
+
+    const visibleArticle = () => {
+      const reader = document.querySelector('.article-reader');
+      if (reader) {
+        if (['opening', 'closing', 'idle'].includes(root.dataset.readerPhase)) return null;
+        return reader.querySelector('.reader-content:not(.reader-page-incoming) .article');
+      }
+      return root.classList.contains('reader-open') ? null : document.querySelector('#main .article');
+    };
+
+    const clearCurrent = () => {
+      links.forEach(link => link.element.removeAttribute('aria-current'));
+      links = [];
+      headings = [];
+      article = null;
+      progress.hidden = true;
+      progressValue.style.transform = 'scaleX(0)';
+      progress.setAttribute('aria-valuenow', '0');
+      root.removeAttribute('data-reading-position');
+    };
+
+    const update = () => {
+      frame = 0;
+      if (!article?.isConnected || !scroller) {
+        if (article) bind();
+        return;
+      }
+      const articleTop = scroller === window ? scrollY + article.getBoundingClientRect().top : 0;
+      const maximum = scroller === window
+        ? Math.max(0, articleTop + article.offsetHeight - innerHeight)
+        : Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      const start = scroller === window ? articleTop : 0;
+      const offset = scroller === window ? scrollY : scroller.scrollTop;
+      const amount = maximum > start ? Math.max(0, Math.min(1, (offset - start) / (maximum - start))) : 1;
+      const percent = Math.round(amount * 100);
+      progressValue.style.transform = `scaleX(${amount})`;
+      progress.setAttribute('aria-valuenow', String(percent));
+
+      if (!headings.length) return;
+      const readerTop = scroller === window ? 0 : scroller.getBoundingClientRect().top;
+      const threshold = readerTop + (scroller === window ? 96 : 112);
+      let active = headings[0];
+      for (const heading of headings) {
+        if (heading.getBoundingClientRect().top > threshold) break;
+        active = heading;
+      }
+      links.forEach(link => {
+        if (link.target === active) link.element.setAttribute('aria-current', 'location');
+        else link.element.removeAttribute('aria-current');
+      });
+    };
+
+    const requestUpdate = () => {
+      if (!frame) frame = requestAnimationFrame(update);
+    };
+
+    function bind() {
+      const nextArticle = visibleArticle();
+      if (nextArticle === article) {
+        if (article) requestUpdate();
+        return;
+      }
+      if (scroller) scroller.removeEventListener('scroll', requestUpdate);
+      clearCurrent();
+      scroller = null;
+      if (!nextArticle) return;
+
+      article = nextArticle;
+      scroller = article.closest('.article-reader') || window;
+      links = [...article.querySelectorAll('.toc a[href^="#"]')].map(element => {
+        let target;
+        try {
+          const id = decodeURIComponent(new URL(element.href).hash.slice(1));
+          target = [...article.querySelectorAll('[id]')].find(candidate => candidate.id === id);
+        }
+        catch { target = null; }
+        return target && article.contains(target) ? { element, target } : null;
+      }).filter(Boolean);
+      headings = links.map(link => link.target);
+      progress.hidden = false;
+      root.setAttribute('data-reading-position', 'true');
+      scroller.addEventListener('scroll', requestUpdate, { passive: true });
+      requestUpdate();
+    }
+
+    addEventListener('resize', requestUpdate, { passive: true });
+    document.addEventListener('articlemounted', bind);
+    new MutationObserver(bind).observe(root, {
+      attributes: true,
+      attributeFilter: ['data-reader-phase'],
+      childList: true,
+      subtree: true,
+    });
+    bind();
+  })();
 })();
