@@ -23,12 +23,10 @@ const rect = selector => {
   const element = typeof selector === 'string' ? document.querySelector(selector) : selector;
   if (!element) return null;
   const box = element.getBoundingClientRect();
-  const label = element.querySelector('.frame-label');
-  return { x: box.x, y: box.y, width: box.width, height: box.height,
-    headerOffset: label ? label.getBoundingClientRect().bottom - box.top + 9 : undefined };
+  return { x: box.x, y: box.y, width: box.width, height: box.height };
 };
 const layout = () => ({
-  code: rect('[data-particle-code]'), project: rect('[data-particle-project]'),
+  project: rect('[data-particle-project]'),
   notes: [...document.querySelectorAll('[data-particle-note]')].map(rect),
   final: rect('[data-particle-final]'), finalButton: rect('[data-particle-final-button]'),
 });

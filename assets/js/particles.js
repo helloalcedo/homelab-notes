@@ -1,4 +1,5 @@
 import { READER_MOTION, smoother } from './reader-motion.js';
+import { createFolioField, createFolioPaths, blendFolioParticle } from './particle-flow.js';
 
 const TAU = Math.PI * 2;
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
@@ -22,7 +23,6 @@ function copyRect(rect, canvasRect) {
     y: (rect.y ?? rect.top) - canvasRect.top,
     width: rect.width,
     height: rect.height,
-    headerOffset: rect.headerOffset,
   };
 }
 
@@ -173,7 +173,6 @@ export class ParticleExperience {
     }
     this.layout = {
       project: copyRect(layout.project, canvasRect),
-      code: copyRect(layout.code, canvasRect),
       notes: (layout.notes || []).map(rect => copyRect(rect, canvasRect)).filter(Boolean),
       final: copyRect(layout.final, canvasRect),
       finalButton: copyRect(layout.finalButton, canvasRect),
@@ -548,32 +547,18 @@ export class ParticleExperience {
   _buildGeometry() {
     this._makeTitle();
     this._buildTree();
-    this.projectPoints = [];
-    this.notePoints = [];
     this.finalPoints = [];
     const w = this.width;
     const h = this.height;
     const project = this.layout.project || { x: w * 0.57, y: h * 0.27, width: w * 0.34, height: h * 0.46 };
-    const code = this.layout.code || { x: w * 0.08, y: h * 0.34, width: w * 0.34, height: h * 0.36 };
-    const headerOffset = this.mobile ? 30 : 44;
-    this._sampleRounded(this.projectPoints, project, 16);
-    const projectHeader = project.y + (project.headerOffset ?? headerOffset);
-    this._sampleLine(this.projectPoints, project.x + 14, projectHeader, project.x + project.width - 14, projectHeader, 520);
-    this._sampleRounded(this.projectPoints, code, 10);
-    const codeHeader = code.y + (code.headerOffset ?? headerOffset);
-    this._sampleLine(this.projectPoints, code.x + 14, codeHeader, code.x + code.width - 14, codeHeader, 420);
 
     const notes = this.layout.notes.length ? this.layout.notes : [
       { x: w * 0.16, y: h * 0.28, width: w * 0.28, height: h * 0.46 },
       { x: w * 0.56, y: h * 0.28, width: w * 0.28, height: h * 0.46 },
     ];
-    for (const note of notes.slice(0, 2)) {
-      this._sampleRounded(this.notePoints, note, 5);
-      const noteHeader = note.y + (note.headerOffset ?? headerOffset);
-      this._sampleLine(this.notePoints, note.x + 14, noteHeader, note.x + note.width - 14, noteHeader, 360);
-      const fold = Math.min(20, note.width * 0.12, note.height * 0.12);
-      this._sampleLine(this.notePoints, note.x + note.width - fold, note.y, note.x + note.width, note.y + fold, 90);
-    }
+    this.projectField = createFolioField([project], this.seed, w, h);
+    this.noteField = createFolioField(notes.slice(0, 2), this.seed, w, h);
+    this.folioPaths = createFolioPaths(this.projectField, this.noteField, this.seed, w);
 
     const finalRect = this.layout.final || { x: w * 0.25, y: h * 0.43, width: w * 0.5, height: Math.min(86, h * 0.15) };
     const finalButton = this.layout.finalButton || {
@@ -740,36 +725,13 @@ export class ParticleExperience {
       return;
     }
 
-    if (stage === 2) {
-      const point = Math.floor(a * (this.projectPoints.length / 2)) * 2;
-      out[0] = this.projectPoints[point] ?? w * 0.72;
-      out[1] = this.projectPoints[point + 1] ?? h * 0.5;
-      out[0] += Math.sin(this.time * 0.0012 + b * TAU) * (0.3 + this.temperature * 1.6);
-      out[1] += Math.cos(this.time * 0.001 + c * TAU) * (0.3 + this.temperature * 1.6);
-      out[2] = Math.max(0, (this.temperature - 0.35) * 1.45);
-      out[3] = (0.22 + d * 0.34) * smooth(0.08, 0.34, local);
-      out[4] = 0.45 + d * 0.35;
-      return;
-    }
-
-    if (stage === 3) {
-      const point = Math.floor(a * (this.notePoints.length / 2)) * 2;
-      const sheetX = this.notePoints[point] ?? w * 0.5;
-      const sheetY = this.notePoints[point + 1] ?? h * 0.5;
-      const collapse = smooth(0.58, 0.94, local);
-      const group = Math.floor(a * 460);
-      const angle = group * 2.399963 + Math.sin(group) * 0.1;
-      const radius = Math.sqrt((group + 0.5) / 460) * (this.mobile ? w * 0.22 : w * 0.16);
-      const turn = collapse * collapse * 8 + this.time * 0.00002;
-      const centerX = w * 0.68;
-      const centerY = this.mobile ? h * 0.64 : h * 0.51;
-      const spiralX = centerX + Math.cos(angle + turn * (1 + a * 0.8)) * (radius * (1 - collapse) + 10);
-      const spiralY = centerY + Math.sin(angle + turn * (1 + a * 0.8)) * (radius * (1 - collapse) + 10) * (this.mobile ? 0.83 : 0.75);
-      out[0] = mix(sheetX, spiralX, collapse);
-      out[1] = mix(sheetY, spiralY, collapse);
-      out[2] = collapse > 0.55 ? (collapse - 0.55) * 2 : 0;
-      out[3] = mix(0.72, 0.9, collapse) * (0.65 + d * 0.35);
-      out[4] = mix(0.72, 1.2, collapse);
+    if (stage === 2 || stage === 3) {
+      const field = stage === 2 ? this.projectField : this.noteField;
+      const k = index * 5;
+      for (let j = 0; j < 5; j++) out[j] = field[k + j];
+      const breath = this.reduced ? 0 : 1;
+      out[0] += Math.sin(this.time * .00032 + b * TAU) * (3 + d * 7) * breath;
+      out[1] += Math.cos(this.time * .00027 + c * TAU) * (4 + b * 8) * breath;
       return;
     }
 
@@ -805,6 +767,28 @@ export class ParticleExperience {
     out[4] = 0.65 + d * 0.7;
   }
 
+  _sceneTarget(stage, local, index, target, next) {
+    this._target(stage, index, local, target);
+    if (this.reduced) return;
+    if (stage === 2 && local > .38) {
+      // Ambient grains keep their quiet drift instead of joining the exchange.
+      if (index >= this.count * .09) {
+        const k = index * 5;
+        for (let j = 0; j < 5; j++) next[j] = this.noteField[k + j];
+        // Both fields share this grain's breath; evaluate it only once.
+        next[0] += target[0] - this.projectField[k];
+        next[1] += target[1] - this.projectField[k + 1];
+        blendFolioParticle(target, next, this.folioPaths, index, local, this.seed[index * 4 + 2], target);
+      }
+    } else {
+      const transition = stage < 5 ? smoother(.66, 1, local) : 0;
+      if (transition > 0) {
+        this._target(stage + 1, index, 0, next);
+        for (let j = 0; j < 5; j++) target[j] = mix(target[j], next[j], transition);
+      }
+    }
+  }
+
   frame(now) {
     this.raf = 0;
     if (!this._canRun()) return;
@@ -827,7 +811,6 @@ export class ParticleExperience {
   _update(delta) {
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
-    const transition = stage < 5 ? smoother(0.66, 1, local) : 0;
     // An exact critically damped spring settles without bouncing, including
     // when frame intervals change. Pointer impulses share the same recovery.
     const frequency = .19;
@@ -838,11 +821,7 @@ export class ParticleExperience {
     this.waves = this.waves.filter(wave => this.time - wave.start < 1800);
     for (let i = 0; i < this.count; i += 1) {
       const q = i * 4;
-      this._target(stage, i, local, target);
-      if (transition > 0) {
-        this._target(stage + 1, i, 0, next);
-        for (let value = 0; value < 5; value += 1) target[value] = mix(target[value], next[value], transition);
-      }
+      this._sceneTarget(stage, local, i, target, next);
       if (this.first) {
         this.xyz[q] = target[0];
         this.xyz[q + 1] = target[1];
@@ -855,8 +834,8 @@ export class ParticleExperience {
       const pointerY = y - this.pointer.y;
       const pointerDistance = Math.hypot(pointerX, pointerY);
       const pointerRadius = this.mobile ? 62 : 95;
-      // Interactive frames must keep matching their real links and inputs.
-      // Free-form scenes retain the tactile repulsion; frames use ink tint.
+      // Let scroll-driven folio currents stay calm around readable links.
+      // Free-form scenes retain tactile repulsion.
       if ((stage === 0 || stage === 1 || stage === 4) && pointerDistance < pointerRadius && pointerDistance > 0.1) {
         const force = (1 - pointerDistance / pointerRadius) * 2.1;
         vx += (pointerX / pointerDistance) * force;
@@ -1238,15 +1217,10 @@ export class ParticleExperience {
     if (!this.xyz) return;
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
-    const transition = stage < 5 ? smoother(0.66, 1, local) : 0;
     const target = [0, 0, 0, 0, 0];
     const next = [0, 0, 0, 0, 0];
     for (let i = 0; i < this.count; i += 1) {
-      this._target(stage, i, local, target);
-      if (transition > 0) {
-        this._target(stage + 1, i, 0, next);
-        for (let value = 0; value < 5; value += 1) target[value] = mix(target[value], next[value], transition);
-      }
+      this._sceneTarget(stage, local, i, target, next);
       const q = i * 4;
       this.xyz[q] = target[0];
       this.xyz[q + 1] = target[1];
@@ -1263,9 +1237,10 @@ export class ParticleExperience {
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
     const target = [0, 0, 0, 0, 0];
+    const next = [0, 0, 0, 0, 0];
     for (let i = 0; i < this.count; i += 1) {
       const q = i * 4;
-      this._target(stage, i, local, target);
+      this._sceneTarget(stage, local, i, target, next);
       this._writeBuffer(i, this.xyz[q], this.xyz[q + 1], target);
     }
     this._draw();
