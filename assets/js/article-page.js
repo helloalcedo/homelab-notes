@@ -10,7 +10,7 @@ if (article && !motion.matches) {
   document.body.append(canvas);
   let engine;
   try {
-    engine = new ParticleExperience(canvas);
+    engine = new ParticleExperience(canvas, { scenes: false });
     engine.setTheme(document.documentElement.dataset.theme);
     if (engine.metrics.renderer === 'static') throw new Error('No particle renderer');
     const reader = createArticleReader({ engine, initialArticle: article });

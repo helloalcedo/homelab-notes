@@ -1,19 +1,24 @@
 import { READER_MOTION, smoother } from './reader-motion.js';
+import { TAU, clamp01, ease, flightOffset, mix, randomGenerator, rankMatch } from './morph.js';
+import { buildStory } from './scenes/story.js';
+import { buildKingfisher, composition } from './scenes/kingfisher.js';
 
-const TAU = Math.PI * 2;
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
-const mix = (from, to, amount) => from + (to - from) * amount;
 const smooth = (from, to, value) => {
   const amount = clamp((value - from) / (to - from));
   return amount * amount * (3 - 2 * amount);
 };
 
-function randomGenerator(seed) {
-  return () => {
-    seed = (seed * 1664525 + 1013904223) >>> 0;
-    return seed / 4294967296;
-  };
-}
+// Palette by scene colour id: fg, accent, flash, muted, faint, bark.
+const PALETTES = {
+  ink: [[0.91, 0.902, 0.863], [0.86, 0.52, 0.4], [0.3, 0.77, 0.91], [0.64, 0.631, 0.6], [0.44, 0.43, 0.4], [0.55, 0.43, 0.33]],
+  paper: [[0.141, 0.141, 0.125], [0.6, 0.318, 0.224], [0.067, 0.463, 0.604], [0.39, 0.38, 0.345], [0.56, 0.545, 0.5], [0.4, 0.3, 0.22]],
+};
+const DUST_SHARE = 0.09;
+const TRANSITION_START = 0.72;
+const MAX_DELAY = 0.3;
+const DIVE_START = 0.45;
+const SIZE = 1.5;
 
 function copyRect(rect, canvasRect) {
   if (!rect || rect.width <= 0 || rect.height <= 0) return null;
@@ -50,22 +55,21 @@ function mortonCode(x, y, minX, minY, spanX, spanY) {
 }
 
 /**
- * One persistent particle pool that morphs through six scroll-driven scenes.
- * Scene geometry is viewport-relative; the controller supplies live DOM rects.
+ * One persistent particle pool that draws every visual on the home page: the perched
+ * kingfisher, its dive, and the five chapters below the surface. Scene modules supply
+ * poses; this engine owns slots, transitions, interaction, rendering and the reader morphs.
  */
 export class ParticleExperience {
-  constructor(canvas, { title = 'Alcedo' } = {}) {
+  constructor(canvas, { scenes = true } = {}) {
     if (!canvas?.getContext) throw new TypeError('ParticleExperience requires a canvas.');
     this.canvas = canvas;
     this.parent = canvas.parentElement;
-    this.titleText = title;
+    this.useScenes = scenes;
     this.width = 1;
     this.height = 1;
     this.dpr = 1;
     this.mobile = false;
     this.progress = 0;
-    this.temperature = 0.3;
-    this.effort = 2;
     this.theme = 'ink';
     this.reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.pointer = { x: -2000, y: -2000 };
@@ -80,13 +84,21 @@ export class ParticleExperience {
     this.visible = !document.hidden;
     this.contextLost = false;
     this.destroyed = false;
-    this.first = true;
     this.ready = false;
     this.renderer = 'static';
     this.poolVersion = 0;
     this.layout = {};
     this.documentMorph = null;
     this.pageTurn = null;
+    this.highlight = { pill: 0, widget: 0, note0: 0, note1: 0 };
+    this.highlightTarget = { ...this.highlight };
+    this.reflection = { waterY: 0, alpha: 0 };
+    this.scenes = null;
+    this.ctx = { time: 0, seed: null, palette: PALETTES.ink, pointer: this.pointer, highlight: this.highlight };
+    this._a = new Float32Array(7);
+    this._b = new Float32Array(7);
+    this._o = new Float32Array(7);
+    this._offset = [0, 0];
     this.frame = this.frame.bind(this);
     this._onVisibility = this._onVisibility.bind(this);
     this._onContextLost = this._onContextLost.bind(this);
@@ -103,14 +115,6 @@ export class ParticleExperience {
 
     this.resize();
     queueMicrotask(() => { if (!this.destroyed) this._dispatchState(); });
-    document.fonts?.load?.('italic 180px Instrument', this.titleText).then(() => {
-      if (this.destroyed) return;
-      this._makeTitle();
-      if (this.pageTurn) this._renderPageTurn();
-      else if (this.documentMorph) this._renderDocumentMorph();
-      else if (this.reduced) this._snapToTargets();
-      else this._wake();
-    }).catch(() => {});
   }
 
   get metrics() {
@@ -133,8 +137,14 @@ export class ParticleExperience {
     };
   }
 
-  resize(layout = {}) {
+  /** Scene anchors for the controller: where the bird enters the water, and the depth. */
+  get story() {
+    return this.king ? { entry: this.king.layout.entry, impact: this.king.impact, waterY: this.king.layout.waterY } : null;
+  }
+
+  resize(layout = this.rawLayout || {}) {
     if (this.destroyed) return this;
+    this.rawLayout = layout;
     const previousWidth = this.width;
     const previousHeight = this.height;
     const canvasRect = this.canvas.getBoundingClientRect();
@@ -166,13 +176,10 @@ export class ParticleExperience {
       this.pageTurn.rect.width *= scaleX;
       this.pageTurn.rect.height *= scaleY;
     }
-    this.layout = {
-      project: copyRect(layout.project, canvasRect),
-      code: copyRect(layout.code, canvasRect),
-      notes: (layout.notes || []).map(rect => copyRect(rect, canvasRect)).filter(Boolean),
-      final: copyRect(layout.final, canvasRect),
-      finalButton: copyRect(layout.finalButton, canvasRect),
-    };
+    this.layout = {};
+    for (const [key, value] of Object.entries(layout || {})) {
+      this.layout[key] = Array.isArray(value) ? value.map(rect => copyRect(rect, canvasRect)).filter(Boolean) : copyRect(value, canvasRect);
+    }
 
     const pixelWidth = Math.max(1, Math.round(width * dpr));
     const pixelHeight = Math.max(1, Math.round(height * dpr));
@@ -183,8 +190,8 @@ export class ParticleExperience {
       this.gl.useProgram(this.program);
       this.gl.uniform2f(this.uniforms.resolution, width, height);
       this.gl.uniform1f(this.uniforms.ratio, dpr);
-    } else if (this.ctx) {
-      this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    } else if (this.ctx2d) {
+      this.ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
     if (breakpointChanged) this._allocatePool();
@@ -197,7 +204,7 @@ export class ParticleExperience {
     if (this.pageTurn) this._refreshPageGlyphTargets();
     if (this.pageTurn) this._renderPageTurn();
     else if (this.documentMorph) this._renderDocumentMorph();
-    else if (this.reduced) this._snapToTargets();
+    else if (this.reduced || !this.wantsToRun) this._snapToTargets();
     else this._wake();
     return this;
   }
@@ -213,13 +220,10 @@ export class ParticleExperience {
 
   setTheme(theme = 'ink') {
     this.theme = theme === 'paper' ? 'paper' : 'ink';
+    this.ctx.palette = PALETTES[this.theme];
     if (this.pageTurn) this._renderPageTurn();
     else if (this.documentMorph) this._renderDocumentMorph();
-    else if (this.reduced) this._renderStatic();
-    else if (!this.wantsToRun) {
-      if (this.first) this._snapToTargets();
-      else this._renderStatic();
-    }
+    else if (this.reduced || !this.raf) this._snapToTargets();
     else this._wake();
     return this;
   }
@@ -233,6 +237,17 @@ export class ParticleExperience {
     else if (this.documentMorph) this._renderDocumentMorph();
     else if (this.reduced) this._snapToTargets();
     else this._wake();
+    return this;
+  }
+
+  /** Ease a named interactive state (hovered widget, focused search) between 0 and 1. */
+  setHighlight(name, value) {
+    if (!(name in this.highlightTarget)) return this;
+    this.highlightTarget[name] = clamp(Number(value) || 0);
+    if (this.reduced) {
+      this.highlight[name] = this.highlightTarget[name];
+      this._snapToTargets();
+    } else this._wake();
     return this;
   }
 
@@ -251,27 +266,21 @@ export class ParticleExperience {
   }
 
   pulse(x = this.width / 2, y = this.height / 2, strength = 1) {
-    if (this.documentMorph || this.pageTurn) return this;
+    if (this.documentMorph || this.pageTurn || this.reduced) return this;
     this.waves.push({ x, y, start: this.time, strength });
     if (this.waves.length > 8) this.waves.shift();
-    if (this.reduced) this._renderStatic();
-    else this._wake();
+    this._wake();
     return this;
   }
 
   burst() {
-    if (this.documentMorph || this.pageTurn) return this;
-    const rect = this.layout.project;
-    const x = rect ? rect.x + rect.width / 2 : this.width / 2;
-    const y = rect ? rect.y + rect.height / 2 : this.height / 2;
-    this.pulse(x, y, 2.4);
-    if (this.reduced) return this;
+    if (this.documentMorph || this.pageTurn || this.reduced || !this.disp) return this;
     for (let i = 0; i < this.count; i += 1) {
       const q = i * 4;
       const angle = this.seed[q] * TAU;
-      const speed = 12 + this.seed[q + 1] * 45;
-      this.xyz[q + 2] += Math.cos(angle) * speed;
-      this.xyz[q + 3] += Math.sin(angle) * speed;
+      const speed = 6 + this.seed[q + 1] * 18;
+      this.disp[q + 2] += Math.cos(angle) * speed;
+      this.disp[q + 3] += Math.sin(angle) * speed;
     }
     this._wake();
     return this;
@@ -301,7 +310,6 @@ export class ParticleExperience {
     if (!rect) return this;
     if (this.pageTurn) this.endPageTurn();
     if (this.documentMorph) this.endDocumentMorph();
-    if (this.first) this._snapToTargets();
     this._cancelFrame();
     this.documentMorph = {
       amount: 0,
@@ -335,8 +343,7 @@ export class ParticleExperience {
     const canvasRect = this.canvas.getBoundingClientRect();
     updateRect(morph.expandedRect, expandedRect, canvasRect);
     updateRect(morph.sourceRect, sourceRect, canvasRect);
-    const nextAmount = clamp(Number(amount) || 0);
-    morph.amount = nextAmount;
+    morph.amount = clamp(Number(amount) || 0);
     this._renderDocumentMorph();
     return this;
   }
@@ -359,7 +366,6 @@ export class ParticleExperience {
     const localRect = copyRect(rect, this.canvas.getBoundingClientRect());
     if (!localRect) return this;
     if (this.pageTurn) this.endPageTurn();
-    if (this.first) this._snapToTargets();
     this._cancelFrame();
     this.pageTurn = {
       amount: 0,
@@ -457,9 +463,9 @@ export class ParticleExperience {
         this.gl = null;
       }
     }
-    try { this.ctx = this.canvas.getContext('2d', { alpha: true }); }
-    catch { this.ctx = null; }
-    this.renderer = this.ctx ? 'canvas' : 'static';
+    try { this.ctx2d = this.canvas.getContext('2d', { alpha: true }); }
+    catch { this.ctx2d = null; }
+    this.renderer = this.ctx2d ? 'canvas' : 'static';
   }
 
   _createWebGLResources() {
@@ -475,10 +481,22 @@ export class ParticleExperience {
       }
       return shader;
     };
+    // The same buffer is drawn twice on the surface scene: once mirrored below the
+    // waterline with ripples (the reflection), then normally.
     const vertex = compile(gl.VERTEX_SHADER, `
       attribute vec2 position; attribute float size; attribute vec4 color;
-      uniform vec2 resolution; uniform float ratio; varying vec4 tint;
-      void main(){vec2 p=position/resolution;gl_Position=vec4(p.x*2.0-1.0,1.0-p.y*2.0,0.0,1.0);gl_PointSize=size*ratio;tint=color;}
+      uniform vec2 resolution; uniform float ratio; uniform float mirror; uniform float waterY; uniform float mirrorAlpha; uniform float time;
+      varying vec4 tint;
+      void main(){
+        vec2 p=position; float a=color.a;
+        if(mirror>0.5){
+          float d=waterY-p.y;
+          a*=step(1.5,d)*mirrorAlpha*(1.0-clamp(d/(resolution.y*0.36),0.0,1.0))*0.3;
+          p.y=waterY+d*0.9+3.0;
+          p.x+=sin(p.y*0.11+time*0.0024)*(1.1+d*0.012)+sin(p.y*0.037-time*0.0013)*1.4;
+        }
+        vec2 q=p/resolution; gl_Position=vec4(q.x*2.0-1.0,1.0-q.y*2.0,0.0,1.0); gl_PointSize=size*ratio; tint=vec4(color.rgb,a);
+      }
     `);
     const fragment = compile(gl.FRAGMENT_SHADER, `
       precision mediump float; varying vec4 tint;
@@ -493,10 +511,7 @@ export class ParticleExperience {
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error('Particle shader link failed.');
     this.program = program;
     this.vertexBuffer = gl.createBuffer();
-    this.uniforms = {
-      resolution: gl.getUniformLocation(program, 'resolution'),
-      ratio: gl.getUniformLocation(program, 'ratio'),
-    };
+    this.uniforms = Object.fromEntries(['resolution', 'ratio', 'mirror', 'waterY', 'mirrorAlpha', 'time'].map(name => [name, gl.getUniformLocation(program, name)]));
     gl.useProgram(program);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
     if (this.buffer) gl.bufferData(gl.ARRAY_BUFFER, this.buffer.byteLength, gl.DYNAMIC_DRAW);
@@ -514,11 +529,14 @@ export class ParticleExperience {
     // A lost WebGL context keeps its context object. Preserve the WebGL-sized
     // pool while the renderer is temporarily marked static during recovery.
     const usesWebGLPool = this.renderer === 'webgl' || Boolean(this.gl);
-    const desired = usesWebGLPool ? (this.mobile ? 10000 : 19000) : Math.min(1800, this.mobile ? 10000 : 19000);
+    const desired = usesWebGLPool ? (this.mobile ? 10000 : 19000) : 1800;
     this.count = desired;
+    this.dustCount = Math.floor(desired * DUST_SHARE);
     this.xyz = new Float32Array(desired * 4);
+    this.disp = new Float32Array(desired * 4);
     this.seed = new Float32Array(desired * 4);
     this.buffer = new Float32Array(desired * 7);
+    this.ctx.seed = this.seed;
     const random = randomGenerator(55);
     for (let i = 0; i < this.seed.length; i += 1) this.seed[i] = random();
     if (this.gl && !this.contextLost) {
@@ -526,264 +544,97 @@ export class ParticleExperience {
       this.gl.bufferData(this.gl.ARRAY_BUFFER, this.buffer.byteLength, this.gl.DYNAMIC_DRAW);
     }
     this.poolVersion += 1;
-    this.first = true;
   }
 
   _buildGeometry() {
-    this._makeTitle();
-    this._buildTree();
-    this.projectPoints = [];
-    this.notePoints = [];
-    this.finalPoints = [];
+    if (!this.useScenes) {
+      this.scenes = null;
+      return;
+    }
     const w = this.width;
     const h = this.height;
-    const project = this.layout.project || { x: w * 0.57, y: h * 0.27, width: w * 0.34, height: h * 0.46 };
-    const code = this.layout.code || { x: w * 0.08, y: h * 0.34, width: w * 0.34, height: h * 0.36 };
-    const headerOffset = this.mobile ? 30 : 44;
-    this._sampleRounded(this.projectPoints, project, 16);
-    this._sampleLine(this.projectPoints, project.x + 14, project.y + headerOffset, project.x + project.width - 14, project.y + headerOffset, 520);
-    this._sampleRounded(this.projectPoints, code, 10);
-    this._sampleLine(this.projectPoints, code.x + 14, code.y + headerOffset, code.x + code.width - 14, code.y + headerOffset, 420);
-
-    const notes = this.layout.notes.length ? this.layout.notes : [
-      { x: w * 0.16, y: h * 0.28, width: w * 0.28, height: h * 0.46 },
-      { x: w * 0.56, y: h * 0.28, width: w * 0.28, height: h * 0.46 },
-    ];
-    for (const note of notes.slice(0, 2)) {
-      this._sampleRounded(this.notePoints, note, 5);
-      this._sampleLine(this.notePoints, note.x + 14, note.y + headerOffset, note.x + note.width - 14, note.y + headerOffset, 360);
-      const fold = Math.min(20, note.width * 0.12, note.height * 0.12);
-      this._sampleLine(this.notePoints, note.x + note.width - fold, note.y, note.x + note.width, note.y + fold, 90);
-    }
-
-    const finalRect = this.layout.final || { x: w * 0.25, y: h * 0.43, width: w * 0.5, height: Math.min(86, h * 0.15) };
-    const finalButton = this.layout.finalButton || {
-      x: finalRect.x + finalRect.width - finalRect.height,
-      y: finalRect.y,
-      width: finalRect.height,
-      height: finalRect.height,
-    };
-    this._sampleRounded(this.finalPoints, finalRect, finalRect.height / 2);
-    this._sampleRounded(this.finalPoints, finalButton, Math.min(finalButton.width, finalButton.height) / 2);
-    this._buildFlow();
+    const mobile = this.mobile;
+    const particles = this.count - this.dustCount;
+    const surface = composition({ w, h, mobile });
+    const story = buildStory({ w, h, mobile, layout: this.layout, particles, rootX: surface.entry.x });
+    this.king = buildKingfisher({ w, h, mobile, particles, tree: story.tree, sceneOne: story.scenes[0] });
+    this.scenes = [this.king.scene, ...story.scenes];
+    this._assignSlots();
   }
 
-  _makeTitle() {
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(this.width));
-    canvas.height = Math.max(1, Math.round(this.height));
-    const context = canvas.getContext('2d', { willReadFrequently: true });
-    if (!context) { this.title = [this.width / 2, this.height / 2]; return; }
-    const size = this.mobile ? this.width * 0.225 : this.width * 0.0958;
-    context.font = `italic ${size}px Instrument, serif`;
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.fillStyle = '#fff';
-    context.fillText(this.titleText, this.width / 2, this.height / 2);
-    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    const points = [];
-    for (let y = Math.max(0, Math.floor(this.height / 2 - size)); y < Math.min(canvas.height, this.height / 2 + size); y += 1) {
-      for (let x = 0; x < canvas.width; x += 1) {
-        if (pixels[(y * canvas.width + x) * 4 + 3] > 70) points.push(x, y);
+  /**
+   * Give every particle one slot per scene. Scene 00 slots are an even shuffle; scene 01
+   * follows the dive's body-to-branch order; later scenes are rank-matched to the previous
+   * scene's rest positions so each transition keeps neighbours together.
+   */
+  _assignSlots() {
+    const n = this.count;
+    const dust = this.dustCount;
+    const m = n - dust;
+    const ctx = this.ctx;
+    const saved = ctx.time;
+    ctx.time = 0;
+    this.slots = Array.from({ length: 6 }, () => new Float32Array(n));
+    this.delays = Array.from({ length: 5 }, () => new Float32Array(n));
+    const order = Array.from({ length: m }, (_, k) => k);
+    const random = randomGenerator(907);
+    for (let k = m - 1; k > 0; k -= 1) {
+      const j = Math.floor(random() * (k + 1));
+      [order[k], order[j]] = [order[j], order[k]];
+    }
+    let others = 0;
+    for (let j = 0; j < m; j += 1) {
+      const i = dust + j;
+      const f0 = (order[j] + 0.5) / m;
+      this.slots[0][i] = f0;
+      this.slots[1][i] = this.king.targetFor(f0, f0 >= this.king.birdSpan ? others++ : 0);
+    }
+    const source = new Float32Array(m * 2);
+    const destination = new Float32Array(m * 2);
+    const out = this._o;
+    for (let scene = 2; scene <= 5; scene += 1) {
+      for (let j = 0; j < m; j += 1) {
+        const i = dust + j;
+        this.scenes[scene - 1].pose(this.slots[scene - 1][i], i, 0.5, ctx, out, true);
+        source[j * 2] = out[0];
+        source[j * 2 + 1] = out[1];
+        this.scenes[scene].pose((j + 0.5) / m, i, 0, ctx, out, true);
+        destination[j * 2] = out[0];
+        destination[j * 2 + 1] = out[1];
+      }
+      const match = rankMatch(source, destination, m);
+      for (let j = 0; j < m; j += 1) this.slots[scene][dust + j] = (match[j] + 0.5) / m;
+      // Particles leading in the direction of travel leave first: a wave, not a swap.
+      let sx = 0;
+      let sy = 0;
+      let dx = 0;
+      let dy = 0;
+      for (let j = 0; j < m; j += 1) {
+        sx += source[j * 2];
+        sy += source[j * 2 + 1];
+        dx += destination[match[j] * 2];
+        dy += destination[match[j] * 2 + 1];
+      }
+      const dirX = (dx - sx) / m;
+      const dirY = (dy - sy) / m;
+      const length = Math.hypot(dirX, dirY) || 1;
+      let min = Infinity;
+      let max = -Infinity;
+      const projection = new Float32Array(m);
+      for (let j = 0; j < m; j += 1) {
+        const value = (source[j * 2] * dirX + source[j * 2 + 1] * dirY) / length;
+        projection[j] = value;
+        if (value < min) min = value;
+        if (value > max) max = value;
+      }
+      const span = Math.max(1, max - min);
+      const delays = this.delays[scene - 1];
+      for (let j = 0; j < m; j += 1) {
+        const lead = 1 - (projection[j] - min) / span;
+        delays[dust + j] = MAX_DELAY * clamp(lead * 0.78 + this.seed[(dust + j) * 4 + 1] * 0.22);
       }
     }
-    this.title = points.length ? points : [this.width / 2, this.height / 2];
-  }
-
-  _buildTree() {
-    const w = this.width;
-    const h = this.height;
-    const random = randomGenerator(5501);
-    this.edges = [];
-    this.treeNodes = [];
-    const startX = this.mobile ? w * 0.10 : w * 0.455;
-    const endX = this.mobile ? w * 0.91 : w * 0.91;
-    const centerY = this.mobile ? h * 0.66 : h * 0.515;
-    const spread = this.mobile ? h * 0.20 : h * 0.325;
-    this.treeCenter = { x: startX, y: centerY };
-    const root = { x: startX, y: centerY, id: 0 };
-    this.treeNodes.push(root);
-    let id = 1;
-    const walk = (node, depth, min, max, chosen) => {
-      if (depth === 4) return;
-      const branches = depth === 0 ? 3 : 2;
-      for (let j = 0; j < branches; j += 1) {
-        const low = min + ((max - min) * j) / branches;
-        const high = min + ((max - min) * (j + 1)) / branches;
-        const destination = {
-          x: mix(startX, endX, (depth + 1) / 4) + (depth === 3 ? 0 : (random() - 0.5) * w * 0.02),
-          y: centerY + ((low + high) / 2) * spread + (random() - 0.5) * spread * 0.045,
-          id: id++,
-        };
-        const selected = chosen && j === (depth === 0 || depth === 1 ? 1 : 0);
-        this.edges.push({ a: node, b: destination, depth, selected });
-        this.treeNodes.push(destination);
-        walk(destination, depth + 1, low, high, selected);
-      }
-    };
-    walk(root, 0, -1.05, 1.05, true);
-  }
-
-  _buildFlow() {
-    const w = this.width;
-    const h = this.height;
-    const compact = this.mobile && h <= 650;
-    const centerY = this.mobile ? h * (compact ? 0.64 : 0.67) : h * 0.51;
-    const left = this.mobile ? w * 0.12 : w * 0.47;
-    const middle = this.mobile ? w * 0.51 : w * 0.68;
-    const right = this.mobile ? w * 0.87 : w * 0.90;
-    const middleRows = this.mobile ? (compact ? [h * 0.50, h * 0.64, h * 0.78] : [h * 0.51, h * 0.67, h * 0.83]) : [h * 0.28, h * 0.51, h * 0.74];
-    this.flowNodes = [{ x: left, y: centerY, label: '실험', r: this.mobile ? 12 : 18 }];
-    ['Hugo', 'Velog', 'GitHub'].forEach((label, index) => {
-      this.flowNodes.push({ x: middle, y: middleRows[index], label, r: this.mobile ? 13 : 21 });
-    });
-    this.flowNodes.push({ x: right, y: centerY, label: '기록', r: this.mobile ? 14 : 18 });
-    this.flowEdges = [];
-    for (let index = 1; index <= 3; index += 1) {
-      this.flowEdges.push({ a: this.flowNodes[0], b: this.flowNodes[index], index, out: false });
-      this.flowEdges.push({ a: this.flowNodes[index], b: this.flowNodes[4], index, out: true });
-    }
-  }
-
-  _sampleLine(points, x1, y1, x2, y2, count) {
-    for (let i = 0; i < count; i += 1) {
-      const amount = count <= 1 ? 0 : i / (count - 1);
-      points.push(mix(x1, x2, amount), mix(y1, y2, amount));
-    }
-  }
-
-  _sampleRounded(points, rect, radius) {
-    if (!rect) return;
-    const r = Math.min(radius, rect.width / 2, rect.height / 2);
-    const perimeter = 2 * (rect.width + rect.height - 4 * r) + TAU * r;
-    const count = Math.max(160, Math.round(perimeter * 2.4));
-    const pushArc = (cx, cy, start, length, offset) => {
-      const samples = Math.max(18, Math.round((length / perimeter) * count));
-      for (let i = 0; i < samples; i += 1) {
-        const angle = start + (i / Math.max(1, samples - 1)) * offset;
-        points.push(cx + Math.cos(angle) * r, cy + Math.sin(angle) * r);
-      }
-    };
-    this._sampleLine(points, rect.x + r, rect.y, rect.x + rect.width - r, rect.y, Math.max(12, Math.round(rect.width * 2)));
-    pushArc(rect.x + rect.width - r, rect.y + r, -Math.PI / 2, Math.PI * r / 2, Math.PI / 2);
-    this._sampleLine(points, rect.x + rect.width, rect.y + r, rect.x + rect.width, rect.y + rect.height - r, Math.max(12, Math.round(rect.height * 2)));
-    pushArc(rect.x + rect.width - r, rect.y + rect.height - r, 0, Math.PI * r / 2, Math.PI / 2);
-    this._sampleLine(points, rect.x + rect.width - r, rect.y + rect.height, rect.x + r, rect.y + rect.height, Math.max(12, Math.round(rect.width * 2)));
-    pushArc(rect.x + r, rect.y + rect.height - r, Math.PI / 2, Math.PI * r / 2, Math.PI / 2);
-    this._sampleLine(points, rect.x, rect.y + rect.height - r, rect.x, rect.y + r, Math.max(12, Math.round(rect.height * 2)));
-    pushArc(rect.x + r, rect.y + r, Math.PI, Math.PI * r / 2, Math.PI / 2);
-  }
-
-  _target(stage, index, local, out) {
-    const w = this.width;
-    const h = this.height;
-    const q = index * 4;
-    const a = this.seed[q];
-    const b = this.seed[q + 1];
-    const c = this.seed[q + 2];
-    const d = this.seed[q + 3];
-    out[2] = 0;
-    out[3] = 0.65;
-    out[4] = 0.8 + d * 0.5;
-
-    if (stage > 0 && index < this.count * 0.09) {
-      out[0] = ((a * w + this.time * 0.003 * (b - 0.4)) % w + w) % w;
-      out[1] = ((c * h + Math.sin(this.time * 0.0001 + a * 10) * 12) % h + h) % h;
-      out[3] = 0.035 + d * 0.075;
-      out[4] = 0.4 + d * 0.6;
-      return;
-    }
-
-    if (stage === 0) {
-      const point = Math.floor(a * (this.title.length / 2)) * 2;
-      out[0] = this.title[point] + Math.sin(this.time * 0.0005 + b * TAU) * 0.55;
-      out[1] = this.title[point + 1] + Math.cos(this.time * 0.0006 + c * TAU) * 0.55;
-      out[3] = 0.5 + d * 0.5;
-      out[4] = 0.65 + d * 0.5;
-      return;
-    }
-
-    if (stage === 1) {
-      const edge = this.edges[Math.floor(a * this.edges.length)];
-      const amount = (b + this.time * 0.000006 * (0.4 + c)) % 1;
-      const eased = amount * amount * (3 - 2 * amount);
-      const spread = (0.35 + c * 1.4) * (1 + (this.effort < 2 ? (2 - this.effort) * 0.6 : 0));
-      out[0] = mix(edge.a.x, edge.b.x, amount) + Math.sin(d * TAU + this.time * 0.001) * spread;
-      out[1] = mix(edge.a.y, edge.b.y, eased) + Math.cos(c * TAU + this.time * 0.001) * spread;
-      if (edge.selected && (edge.depth + amount) / 4 < smooth(0.3, 0.92, local) * 1.2) out[2] = 0.8;
-      out[3] = mix(0.70, edge.selected ? 0.85 : 0.12, smooth(0.58, 0.91, local)) * (0.4 + d * 0.6);
-      out[4] = 0.65 + d * 0.65;
-      if (this.effort < 4 && edge.depth === 3 && c > (this.effort + 1) / 5) {
-        out[0] += (c - 0.4) * 42;
-        out[1] += (d - 0.5) * 45;
-        out[3] *= 0.4;
-      }
-      return;
-    }
-
-    if (stage === 2) {
-      const point = Math.floor(a * (this.projectPoints.length / 2)) * 2;
-      out[0] = this.projectPoints[point] ?? w * 0.72;
-      out[1] = this.projectPoints[point + 1] ?? h * 0.5;
-      out[0] += Math.sin(this.time * 0.0012 + b * TAU) * (0.3 + this.temperature * 1.6);
-      out[1] += Math.cos(this.time * 0.001 + c * TAU) * (0.3 + this.temperature * 1.6);
-      out[2] = Math.max(0, (this.temperature - 0.35) * 1.45);
-      out[3] = (0.22 + d * 0.34) * smooth(0.08, 0.34, local);
-      out[4] = 0.45 + d * 0.35;
-      return;
-    }
-
-    if (stage === 3) {
-      const point = Math.floor(a * (this.notePoints.length / 2)) * 2;
-      const sheetX = this.notePoints[point] ?? w * 0.5;
-      const sheetY = this.notePoints[point + 1] ?? h * 0.5;
-      const collapse = smooth(0.58, 0.94, local);
-      const group = Math.floor(a * 460);
-      const angle = group * 2.399963 + Math.sin(group) * 0.1;
-      const radius = Math.sqrt((group + 0.5) / 460) * (this.mobile ? w * 0.22 : w * 0.16);
-      const turn = collapse * collapse * 8 + this.time * 0.00002;
-      const centerX = w * 0.68;
-      const centerY = this.mobile ? h * 0.64 : h * 0.51;
-      const spiralX = centerX + Math.cos(angle + turn * (1 + a * 0.8)) * (radius * (1 - collapse) + 10);
-      const spiralY = centerY + Math.sin(angle + turn * (1 + a * 0.8)) * (radius * (1 - collapse) + 10) * (this.mobile ? 0.83 : 0.75);
-      out[0] = mix(sheetX, spiralX, collapse);
-      out[1] = mix(sheetY, spiralY, collapse);
-      out[2] = collapse > 0.55 ? (collapse - 0.55) * 2 : 0;
-      out[3] = mix(0.72, 0.9, collapse) * (0.65 + d * 0.35);
-      out[4] = mix(0.72, 1.2, collapse);
-      return;
-    }
-
-    if (stage === 4) {
-      if (a < 0.48) {
-        const node = this.flowNodes[Math.floor((a / 0.48) * this.flowNodes.length)];
-        const angle = b * TAU;
-        const isMiddle = node !== this.flowNodes[0] && node !== this.flowNodes[4];
-        const filled = local > 0.25 && isMiddle;
-        const radius = node.r * (filled ? Math.sqrt(c) : 1 + (c - 0.5) * 0.07);
-        out[0] = node.x + Math.cos(angle) * radius;
-        out[1] = node.y + Math.sin(angle) * radius;
-        out[3] = filled ? 0.73 : 0.75;
-      } else {
-        const edge = this.flowEdges[Math.floor(((a - 0.48) / 0.52) * this.flowEdges.length)];
-        const amount = (b + this.time * 0.000011) % 1;
-        const eased = amount * amount * (3 - 2 * amount);
-        out[0] = mix(edge.a.x, edge.b.x, amount) + (c - 0.5) * 1.5;
-        out[1] = mix(edge.a.y, edge.b.y, eased) + (d - 0.5) * 1.5;
-        const reveal = smooth(0.06 + edge.index * 0.05, 0.30 + edge.index * 0.06, local);
-        out[3] = amount < reveal ? 0.35 : 0;
-        out[2] = edge.out ? 0.75 : 0;
-        if (edge.out && local < 0.45) out[3] = 0;
-      }
-      out[4] = 0.65 + d * 0.5;
-      return;
-    }
-
-    const point = Math.floor(a * (this.finalPoints.length / 2)) * 2;
-    out[0] = (this.finalPoints[point] ?? w * 0.5) + Math.sin(b * TAU + this.time * 0.001) * 0.9;
-    out[1] = (this.finalPoints[point + 1] ?? h * 0.56) + Math.cos(c * TAU + this.time * 0.001) * 0.9;
-    out[3] = 0.30 + d * 0.52;
-    out[4] = 0.65 + d * 0.7;
+    ctx.time = saved;
   }
 
   frame(now) {
@@ -805,79 +656,125 @@ export class ParticleExperience {
     this._schedule();
   }
 
+  /** Evaluate the pose of particle i at the current progress into `out`. */
+  _pose(i, stage, local, out) {
+    const ctx = this.ctx;
+    if (i < this.dustCount || !this.scenes) {
+      this._dust(i, out);
+      return;
+    }
+    const a = this._a;
+    this.scenes[stage].pose(this.slots[stage][i], i, local, ctx, a);
+    if (stage === 0 && local > DIVE_START) {
+      const b = this._b;
+      this.scenes[1].pose(this.slots[1][i], i, 0, ctx, b);
+      this.king.dive(this.slots[0][i], i, local, ctx, a, b, out);
+      return;
+    }
+    if (stage > 0 && stage < 5 && local > TRANSITION_START) {
+      const b = this._b;
+      this.scenes[stage + 1].pose(this.slots[stage + 1][i], i, 0, ctx, b);
+      const u = (local - TRANSITION_START) / (1 - TRANSITION_START);
+      const t = ease((u - this.delays[stage][i]) / (1 - MAX_DELAY));
+      const offset = flightOffset(a[0], a[1], b[0], b[1], t, Math.min(this.width, this.height), stage * 1.7, this._offset);
+      out[0] = mix(a[0], b[0], t) + offset[0];
+      out[1] = mix(a[1], b[1], t) + offset[1];
+      for (let k = 2; k < 7; k += 1) out[k] = mix(a[k], b[k], t);
+      return;
+    }
+    for (let k = 0; k < 7; k += 1) out[k] = a[k];
+  }
+
+  /** Marine snow: faint drifting motes that rise past the camera as it descends. */
+  _dust(i, out) {
+    const q = i * 4;
+    const s = this.seed;
+    const w = this.width;
+    const h = this.height;
+    const time = this.reduced ? 0 : this.time;
+    const depth = this.king ? (this.progress < 1 ? this.king.camera(this.progress) : this.king.cameraDepth + (this.progress - 1) * h * 0.14) : 0;
+    out[0] = ((s[q] * w + time * 0.003 * (s[q + 1] - 0.4)) % w + w) % w;
+    out[1] = ((s[q + 2] * h + Math.sin(time * 0.0001 + s[q] * 10) * 12 - time * 0.0016 * (0.3 + s[q + 3]) - depth * 0.45) % h + h) % h;
+    out[2] = 0.45 + s[q + 3] * 0.6;
+    const colour = this.ctx.palette[0];
+    out[3] = colour[0];
+    out[4] = colour[1];
+    out[5] = colour[2];
+    out[6] = 0.035 + s[q + 3] * 0.075;
+  }
+
   _update(delta) {
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
-    const transition = stage < 5 ? smooth(0.81, 1, local) : 0;
-    const target = [0, 0, 0, 0, 0];
-    const next = [0, 0, 0, 0, 0];
+    const ctx = this.ctx;
+    ctx.time = this.time;
+    for (const name in this.highlight) {
+      this.highlight[name] += (this.highlightTarget[name] - this.highlight[name]) * Math.min(1, 0.12 * delta);
+    }
+    if (this.scenes) {
+      this.scenes[stage].prepare?.(ctx);
+      this.reflection = stage === 0 ? this.king.reflection(local) : { waterY: 0, alpha: 0 };
+    }
     this.waves = this.waves.filter(wave => this.time - wave.start < 1800);
+    const out = this._o;
+    const pointerRadius = this.mobile ? 62 : 95;
+    const waves = this.waves;
+    const damping = Math.pow(0.8, delta);
     for (let i = 0; i < this.count; i += 1) {
+      this._pose(i, stage, local, out);
       const q = i * 4;
-      this._target(stage, i, local, target);
-      if (transition > 0) {
-        this._target(stage + 1, i, 0, next);
-        for (let value = 0; value < 5; value += 1) target[value] = mix(target[value], next[value], transition);
+      let dx = this.disp[q];
+      let dy = this.disp[q + 1];
+      let vx = this.disp[q + 2];
+      let vy = this.disp[q + 3];
+      const x = out[0] + dx;
+      const y = out[1] + dy;
+      const px = x - this.pointer.x;
+      const py = y - this.pointer.y;
+      const distance = Math.sqrt(px * px + py * py);
+      if (distance < pointerRadius && distance > 0.1) {
+        const force = (1 - distance / pointerRadius) * 2.1;
+        vx += (px / distance) * force;
+        vy += (py / distance) * force;
       }
-      if (this.first) {
-        this.xyz[q] = target[0];
-        this.xyz[q + 1] = target[1];
-      }
-      let x = this.xyz[q];
-      let y = this.xyz[q + 1];
-      let vx = this.xyz[q + 2];
-      let vy = this.xyz[q + 3];
-      const pointerX = x - this.pointer.x;
-      const pointerY = y - this.pointer.y;
-      const pointerDistance = Math.hypot(pointerX, pointerY);
-      const pointerRadius = this.mobile ? 62 : 95;
-      if (pointerDistance < pointerRadius && pointerDistance > 0.1) {
-        const force = (1 - pointerDistance / pointerRadius) * 2.1;
-        vx += (pointerX / pointerDistance) * force;
-        vy += (pointerY / pointerDistance) * force;
-      }
-      for (const wave of this.waves) {
-        const dx = x - wave.x;
-        const dy = y - wave.y;
-        const distance = Math.hypot(dx, dy) + 0.001;
-        const radius = (this.time - wave.start) * 0.65;
-        const band = 1 - Math.abs(distance - radius) / 85;
+      for (let k = 0; k < waves.length; k += 1) {
+        const wave = waves[k];
+        const wx = x - wave.x;
+        const wy = y - wave.y;
+        const d = Math.sqrt(wx * wx + wy * wy) + 0.001;
+        const band = 1 - Math.abs(d - (this.time - wave.start) * 0.65) / 85;
         if (band > 0) {
           const force = band * wave.strength * 2.2;
-          vx += (dx / distance) * force;
-          vy += (dy / distance) * force;
+          vx += (wx / d) * force;
+          vy += (wy / d) * force;
         }
       }
-      vx = (vx + (target[0] - x) * 0.032 * delta) * Math.pow(0.79, delta);
-      vy = (vy + (target[1] - y) * 0.032 * delta) * Math.pow(0.79, delta);
-      x += vx * delta;
-      y += vy * delta;
-      this.xyz[q] = x;
-      this.xyz[q + 1] = y;
-      this.xyz[q + 2] = vx;
-      this.xyz[q + 3] = vy;
-      this._writeBuffer(i, x, y, target);
+      vx = (vx - dx * 0.06 * delta) * damping;
+      vy = (vy - dy * 0.06 * delta) * damping;
+      dx += vx * delta;
+      dy += vy * delta;
+      this.disp[q] = dx;
+      this.disp[q + 1] = dy;
+      this.disp[q + 2] = vx;
+      this.disp[q + 3] = vy;
+      this._write(i, out[0] + dx, out[1] + dy, out);
     }
-    this.first = false;
   }
 
-  _writeBuffer(index, x, y, target) {
-    const offset = index * 7;
-    const ink = this.theme === 'ink';
-    const baseR = ink ? 0.925 : 0.12;
-    const baseG = ink ? 0.914 : 0.12;
-    const baseB = ink ? 0.865 : 0.105;
-    const accentR = ink ? 0.89 : 0.63;
-    const accentG = ink ? 0.53 : 0.25;
-    const accentB = ink ? 0.38 : 0.17;
-    const warm = clamp(target[2]);
-    this.buffer[offset] = x;
-    this.buffer[offset + 1] = y;
-    this.buffer[offset + 2] = target[4] * 1.6;
-    this.buffer[offset + 3] = mix(baseR, accentR, warm);
-    this.buffer[offset + 4] = mix(baseG, accentG, warm);
-    this.buffer[offset + 5] = mix(baseB, accentB, warm);
-    this.buffer[offset + 6] = target[3];
+  _write(i, x, y, pose) {
+    const q = i * 4;
+    this.xyz[q] = x;
+    this.xyz[q + 1] = y;
+    this.xyz[q + 2] = this.disp[q + 2];
+    this.xyz[q + 3] = this.disp[q + 3];
+    const o = i * 7;
+    this.buffer[o] = x;
+    this.buffer[o + 1] = y;
+    this.buffer[o + 2] = pose[2] * SIZE;
+    this.buffer[o + 3] = pose[3];
+    this.buffer[o + 4] = pose[4];
+    this.buffer[o + 5] = pose[5];
+    this.buffer[o + 6] = pose[6];
   }
 
   _prepareGlyphTargets(glyphs, sourcePositions = null) {
@@ -1114,8 +1011,7 @@ export class ParticleExperience {
       this.buffer[particle + 5] = b;
       this.buffer[particle + 6] = alpha;
     }
-    this.first = false;
-    this._draw();
+    this._draw(false);
   }
 
   _renderPageTurn() {
@@ -1179,24 +1075,49 @@ export class ParticleExperience {
       this.buffer[particle + 5] = b;
       this.buffer[particle + 6] = alpha;
     }
-    this.first = false;
-    this._draw();
+    this._draw(false);
   }
 
-  _draw() {
+  _draw(scenesVisible = true) {
     if (this.contextLost || this.renderer === 'static') return;
+    const reflect = scenesVisible && !this.documentMorph && !this.pageTurn && this.reflection.alpha > 0.002;
     if (this.gl) {
-      this.gl.clear(this.gl.COLOR_BUFFER_BIT);
-      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
-      this.gl.bufferSubData(this.gl.ARRAY_BUFFER, 0, this.buffer);
-      this.gl.drawArrays(this.gl.POINTS, 0, this.count);
-    } else if (this.ctx) {
-      this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-      this.ctx.clearRect(0, 0, this.width, this.height);
+      const gl = this.gl;
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.buffer);
+      gl.uniform1f(this.uniforms.time, this.time);
+      if (reflect) {
+        gl.uniform1f(this.uniforms.mirror, 1);
+        gl.uniform1f(this.uniforms.waterY, this.reflection.waterY);
+        gl.uniform1f(this.uniforms.mirrorAlpha, this.reflection.alpha);
+        gl.drawArrays(gl.POINTS, 0, this.count);
+      }
+      gl.uniform1f(this.uniforms.mirror, 0);
+      gl.drawArrays(gl.POINTS, 0, this.count);
+    } else if (this.ctx2d) {
+      const context = this.ctx2d;
+      context.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      context.clearRect(0, 0, this.width, this.height);
+      const buffer = this.buffer;
+      if (reflect) {
+        const waterY = this.reflection.waterY;
+        for (let i = 0; i < this.count; i += 1) {
+          const o = i * 7;
+          const d = waterY - buffer[o + 1];
+          if (d < 1.5) continue;
+          const alpha = buffer[o + 6] * this.reflection.alpha * (1 - Math.min(1, d / (this.height * 0.36))) * 0.3;
+          if (alpha < 0.004) continue;
+          const y = waterY + d * 0.9 + 3;
+          context.fillStyle = `rgba(${buffer[o + 3] * 255},${buffer[o + 4] * 255},${buffer[o + 5] * 255},${alpha})`;
+          context.fillRect(buffer[o] + Math.sin(y * 0.11 + this.time * 0.0024) * 1.4, y, buffer[o + 2], buffer[o + 2]);
+        }
+      }
       for (let i = 0; i < this.count; i += 1) {
-        const offset = i * 7;
-        this.ctx.fillStyle = `rgba(${this.buffer[offset + 3] * 255},${this.buffer[offset + 4] * 255},${this.buffer[offset + 5] * 255},${this.buffer[offset + 6]})`;
-        this.ctx.fillRect(this.buffer[offset], this.buffer[offset + 1], this.buffer[offset + 2], this.buffer[offset + 2]);
+        const o = i * 7;
+        if (buffer[o + 6] < 0.004) continue;
+        context.fillStyle = `rgba(${buffer[o + 3] * 255},${buffer[o + 4] * 255},${buffer[o + 5] * 255},${buffer[o + 6]})`;
+        context.fillRect(buffer[o], buffer[o + 1], buffer[o + 2], buffer[o + 2]);
       }
     }
     this._setReady(true);
@@ -1206,37 +1127,27 @@ export class ParticleExperience {
     if (!this.xyz) return;
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
-    const transition = stage < 5 ? smooth(0.81, 1, local) : 0;
-    const target = [0, 0, 0, 0, 0];
-    const next = [0, 0, 0, 0, 0];
-    for (let i = 0; i < this.count; i += 1) {
-      this._target(stage, i, local, target);
-      if (transition > 0) {
-        this._target(stage + 1, i, 0, next);
-        for (let value = 0; value < 5; value += 1) target[value] = mix(target[value], next[value], transition);
-      }
-      const q = i * 4;
-      this.xyz[q] = target[0];
-      this.xyz[q + 1] = target[1];
-      this.xyz[q + 2] = 0;
-      this.xyz[q + 3] = 0;
-      this._writeBuffer(i, target[0], target[1], target);
+    const ctx = this.ctx;
+    const saved = this.time;
+    if (this.reduced) this.time = 0;
+    ctx.time = this.time;
+    if (this.scenes) {
+      this.scenes[stage].prepare?.(ctx);
+      this.reflection = stage === 0 ? this.king.reflection(local) : { waterY: 0, alpha: 0 };
     }
-    this.first = false;
+    const out = this._o;
+    for (let i = 0; i < this.count; i += 1) {
+      this._pose(i, stage, local, out);
+      const q = i * 4;
+      this.disp[q] = 0;
+      this.disp[q + 1] = 0;
+      this.disp[q + 2] = 0;
+      this.disp[q + 3] = 0;
+      if (!this.scenes && i >= this.dustCount) out[6] = 0;
+      this._write(i, out[0], out[1], out);
+    }
+    this.time = saved;
     if (draw) this._draw();
-  }
-
-  _renderStatic() {
-    if (!this.xyz) return;
-    const stage = Math.min(5, Math.floor(this.progress));
-    const local = this.progress - stage;
-    const target = [0, 0, 0, 0, 0];
-    for (let i = 0; i < this.count; i += 1) {
-      const q = i * 4;
-      this._target(stage, i, local, target);
-      this._writeBuffer(i, this.xyz[q], this.xyz[q + 1], target);
-    }
-    this._draw();
   }
 
   _wake() {

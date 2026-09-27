@@ -2,14 +2,14 @@
 @font-face{font-family:Instrument;src:url('../fonts/instrument-italic.ttf') format('truetype');font-style:italic;font-display:swap}
 :root {
   --bg:#141413; --fg:#e8e6dc; --muted:#a3a199; --accent:#c88169;
-  --line:#373732; --surface:#1b1b18; --faint:#8e8c82;
+  --line:#373732; --surface:#1b1b18; --faint:#8e8c82; --flash:#4cc4e8;
   --sans:-apple-system,BlinkMacSystemFont,'Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',sans-serif;
   --serif:Instrument,Korean,serif; --korean:Korean,serif;
   --mono:ui-monospace,SFMono-Regular,Consolas,'Courier New',monospace;
   --paper:var(--bg); --ink:var(--fg); --green:var(--accent); --soft:var(--surface);
   color-scheme:dark;
 }
-:root[data-theme=paper]{--bg:#eeeadf;--fg:#242420;--muted:#646158;--accent:#995139;--line:#c9c3b6;--surface:#e7e2d6;--faint:#6b665c;color-scheme:light}
+:root[data-theme=paper]{--bg:#eeeadf;--fg:#242420;--muted:#646158;--accent:#995139;--line:#c9c3b6;--surface:#e7e2d6;--faint:#6b665c;--flash:#11769a;color-scheme:light}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth;scroll-padding-top:36px;scrollbar-width:thin;scrollbar-color:var(--faint) var(--bg)}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.8 var(--sans);-webkit-font-smoothing:antialiased}

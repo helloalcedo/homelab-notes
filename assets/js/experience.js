@@ -6,18 +6,20 @@ const canvas = document.querySelector('#story-particles');
 const panels = [...document.querySelectorAll('[data-panel]')];
 const chapters = [...document.querySelectorAll('#story-navigation [data-scene]')];
 const navigation = document.querySelector('#story-navigation');
+const readout = document.querySelector('[data-depth-readout]');
 const header = document.querySelector('.story-header');
 const motion = matchMedia('(prefers-reduced-motion: reduce)');
-const stops = [0, 1.35, 2.45, 3.25, 4.55, 5.25];
+// Where each chapter is fully formed, and the end of the scroll track.
+const stops = [0, 1.42, 2.46, 3.44, 4.6, 5.3];
 const end = 5.82;
-let experience, enhanced = false, progress = 0, current = 0, scheduled = false;
-let resizing = 0, hashTimer = 0, pendingFocus = null, ready = false;
+let experience, enhanced = false, target = 0, rendered = 0, velocity = 0, loop = 0, lastTick = 0;
+let current = 0, resizing = 0, hashTimer = 0, pendingFocus = null, ready = false, lastDepth = '';
 let resizeProgress = 0, resizeDestination = null;
 let reader, suspended = false;
 const homePath = location.pathname;
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
-const smooth = (a, b, value) => { const t = clamp((value - a) / (b - a)); return t * t * (3 - 2 * t); };
+const smoother = (a, b, value) => { const t = clamp((value - a) / (b - a)); return t * t * t * (t * (t * 6 - 15) + 10); };
 const maxScroll = () => Math.max(1, document.documentElement.scrollHeight - innerHeight);
 const rect = selector => {
   const element = typeof selector === 'string' ? document.querySelector(selector) : selector;
@@ -25,22 +27,26 @@ const rect = selector => {
   const box = element.getBoundingClientRect();
   return { x: box.x, y: box.y, width: box.width, height: box.height };
 };
-const layout = () => ({
-  code: rect('[data-particle-code]'), project: rect('[data-particle-project]'),
-  notes: [...document.querySelectorAll('[data-particle-note]')].map(rect),
-  final: rect('[data-particle-final]'), finalButton: rect('[data-particle-final-button]'),
-});
+const rects = selector => [...document.querySelectorAll(selector)].map(rect).filter(Boolean);
+/** Measure the DOM anchors the particles draw around (they only fade, never move). */
+const layout = () => {
+  const result = {
+    code: rect('[data-particle-code] pre'), cursor: rect('[data-particle-cursor]'),
+    widget: rect('[data-particle-widget]'), rule: rect('[data-particle-rule]'), status: rect('[data-particle-status]'),
+    steps: rects('[data-particle-step]'), chips: rects('[data-particle-chip]'), buttons: rects('[data-particle-button]'),
+    notes: rects('[data-particle-note]'), noteRules: rects('[data-particle-note-rule]'), noteDetails: rects('[data-particle-note-detail]'),
+    nodes: rects('[data-particle-node]'),
+    final: rect('[data-particle-final]'), finalButton: rect('[data-particle-final-button]'), finalIcon: rect('[data-particle-final-icon]'),
+  };
+  return result;
+};
 const hashScene = () => panels.findIndex(panel => '#' + panel.id === location.hash);
+const sceneAt = value => clamp(Math.floor(value + 0.1), 0, panels.length - 1);
 
-function update() {
-  scheduled = false;
-  if (!enhanced || suspended || resizing) return;
-  resizeDestination = null;
-  progress = clamp(scrollY / maxScroll() * end, 0, end);
-  const scene = Math.min(panels.length - 1, Math.floor(progress));
-  const local = progress - scene;
-  const opacity = motion.matches || scene === 5 ? 1 : 1 - smooth(.77, .98, local);
-  const intro = progress < .06;
+/** Apply one rendered progress value to the DOM and the particles. */
+function apply(value) {
+  const scene = sceneAt(value);
+  const intro = value < 0.06;
   if (intro && (header.contains(document.activeElement) || navigation.contains(document.activeElement))) {
     const title = panels[0].querySelector('h1');
     title.tabIndex = -1;
@@ -53,15 +59,17 @@ function update() {
   }
   root.dataset.scene = String(scene);
   panels.forEach((panel, index) => {
-    const active = index === scene;
-    const accessible = active && opacity > .02;
+    const enter = index === 0 ? 1 : (motion.matches ? Number(index === scene) : smoother(index - 0.1, index + 0.12, value));
+    const exit = index === panels.length - 1 ? 0 : (motion.matches ? Number(index !== scene) : smoother(index + 0.66, index + 0.82, value));
+    const visible = enter > 0.001 && exit < 0.999;
+    const accessible = index === scene;
     if (!accessible && panel.contains(document.activeElement)) {
-      // Keep focus out of a subtree before making it inert/hidden.
       document.activeElement.blur();
-      if (progress >= .06) chapters[scene]?.focus({ preventScroll: true });
+      if (!intro) chapters[scene]?.focus({ preventScroll: true });
     }
-    panel.classList.toggle('is-active', active);
-    panel.style.opacity = active ? opacity : 0;
+    panel.style.setProperty('--in', enter.toFixed(4));
+    panel.style.setProperty('--out', exit.toFixed(4));
+    panel.classList.toggle('is-active', visible);
     panel.inert = !accessible;
     panel.setAttribute('aria-hidden', String(!accessible));
   });
@@ -69,13 +77,15 @@ function update() {
     current = scene;
     chapters.forEach((link, index) => index === scene ? link.setAttribute('aria-current', 'step') : link.removeAttribute('aria-current'));
   }
-  if (pendingFocus === scene && opacity > .8) {
+  const depth = `−${(value >= 5 ? 60 : Math.min(60, value * 12)).toFixed(1)}m`;
+  if (readout && depth !== lastDepth) { readout.textContent = depth; lastDepth = depth; }
+  if (pendingFocus === scene && Math.abs(value - stops[scene]) < 0.08) {
     const heading = panels[scene].querySelector('h1,h2');
     heading.tabIndex = -1;
     heading.focus({ preventScroll: true });
     pendingFocus = null;
   }
-  experience.setProgress(motion.matches ? (scene === 0 ? 0 : stops[scene]) : progress);
+  experience.setProgress(motion.matches ? stops[scene] : value);
   ready = true;
   clearTimeout(hashTimer);
   hashTimer = setTimeout(() => {
@@ -84,10 +94,49 @@ function update() {
     if (location.hash !== hash && (current > 0 || location.hash)) window.history.replaceState(window.history.state, '', hash);
   }, 220);
 }
+
+function tick(now) {
+  loop = 0;
+  if (!enhanced || suspended || resizing) return;
+  const dt = Math.min(0.05, Math.max(0.001, (now - lastTick) / 1000));
+  lastTick = now;
+  if (motion.matches) {
+    rendered = target;
+    velocity = 0;
+  } else {
+    // Critically damped spring: silky under wheel steps, never overshoots a chapter.
+    const omega = 11;
+    const acceleration = -omega * omega * (rendered - target) - 2 * omega * velocity;
+    velocity += acceleration * dt;
+    rendered += velocity * dt;
+    if (Math.abs(rendered - target) < 0.0003 && Math.abs(velocity) < 0.003) {
+      rendered = target;
+      velocity = 0;
+    }
+  }
+  apply(rendered);
+  if (rendered !== target || velocity !== 0) loop = requestAnimationFrame(tick);
+}
+function readScroll() {
+  target = clamp(scrollY / maxScroll() * end, 0, end);
+}
 function requestUpdate() {
-  if (scheduled) return;
-  scheduled = true;
-  requestAnimationFrame(update);
+  if (!enhanced || suspended || resizing) return;
+  readScroll();
+  resizeDestination = null;
+  if (!loop) {
+    lastTick = performance.now();
+    loop = requestAnimationFrame(tick);
+  }
+}
+/** Jump without easing: deep links, history, resize and the reader's return. */
+function settle() {
+  readScroll();
+  rendered = target;
+  velocity = 0;
+  cancelAnimationFrame(loop);
+  loop = 0;
+  apply(rendered);
 }
 function goToScene(scene, { history = true, focus = false, instant = false } = {}) {
   if (suspended || location.pathname !== homePath) return;
@@ -103,7 +152,8 @@ function goToScene(scene, { history = true, focus = false, instant = false } = {
   resizeDestination = stops[scene];
   pendingFocus = focus ? scene : null;
   scrollTo({ top: maxScroll() * stops[scene] / end, behavior: instant || motion.matches ? 'instant' : 'smooth' });
-  requestUpdate();
+  if (instant || motion.matches) settle();
+  else requestUpdate();
 }
 function fallback() {
   enhanced = false;
@@ -114,20 +164,20 @@ function fallback() {
   panels.forEach(panel => {
     panel.inert = false;
     panel.removeAttribute('aria-hidden');
-    panel.style.removeProperty('opacity');
+    panel.style.removeProperty('--in');
+    panel.style.removeProperty('--out');
     panel.classList.remove('is-active');
   });
   panels[current]?.scrollIntoView({ behavior: 'instant' });
 }
 function enhance() {
   const visible = panels.reduce((best, panel, index) => Math.abs(panel.getBoundingClientRect().top) < Math.abs(panels[best].getBoundingClientRect().top) ? index : best, 0);
-  progress = stops[visible];
   root.classList.add('immersive-ready');
   enhanced = true;
   window.history.scrollRestoration = 'manual';
   experience.resize(layout());
-  scrollTo({ top: maxScroll() * progress / end, behavior: 'instant' });
-  update();
+  scrollTo({ top: maxScroll() * stops[visible] / end, behavior: 'instant' });
+  settle();
 }
 
 async function initialize() {
@@ -138,11 +188,11 @@ async function initialize() {
     // A delayed/failed font must never make the actual journal inaccessible.
     let timer;
     await Promise.race([
-      document.fonts.load('italic 180px Instrument'),
+      Promise.all([document.fonts.load('500 38px Korean'), document.fonts.load('italic 18px Instrument')]),
       new Promise(resolve => { timer = setTimeout(resolve, 3500); }),
     ]).finally(() => clearTimeout(timer));
     root.classList.add('immersive-ready');
-    experience = new ParticleExperience(canvas, { title: 'Alcedo' });
+    experience = new ParticleExperience(canvas);
     experience.resize(layout());
     experience.setTheme(root.dataset.theme || 'ink');
     experience.setReducedMotion(motion.matches);
@@ -153,18 +203,23 @@ async function initialize() {
     window.history.scrollRestoration = 'manual';
     experience.start();
     if (initial >= 0) goToScene(initial, { history: false, instant: true });
-    update();
+    else settle();
     reader = createArticleReader({
       engine: experience,
-      getHomeState: () => ({ enhanced, progress, scene: current, url: new URL(homePath + '#' + panels[current].id, location.origin).href }),
-      suspendHome(value) { suspended = value; clearTimeout(hashTimer); },
+      getHomeState: () => ({ enhanced, progress: rendered, scene: current, url: new URL(homePath + '#' + panels[current].id, location.origin).href }),
+      suspendHome(value) {
+        suspended = value;
+        clearTimeout(hashTimer);
+        cancelAnimationFrame(loop);
+        loop = 0;
+      },
       restoreHome(record) {
         const scene = location.pathname === homePath ? Math.max(0, hashScene()) : record.scene;
         const destination = scene === record.scene ? record.progress : stops[scene];
         if (experience.metrics.renderer === 'static') { current = scene; fallback(); return; }
         experience.resize(layout());
         scrollTo({ top: maxScroll() * destination / end, behavior: 'instant' });
-        update();
+        settle();
       },
     });
 
@@ -180,7 +235,7 @@ async function initialize() {
       // Resize can clamp scrollY before its scroll event arrives. Keep the last
       // scene position until layout is rebuilt instead of treating that as input.
       clearTimeout(hashTimer);
-      if (!resizing) resizeProgress = progress;
+      if (!resizing) resizeProgress = rendered;
       clearTimeout(resizing);
       resizing = setTimeout(() => {
         resizing = 0;
@@ -190,12 +245,12 @@ async function initialize() {
         if (reader.active) { experience.resize(layout()); reader.resize(); return; }
         experience.resize(layout());
         scrollTo({ top: maxScroll() * destination / end, behavior: 'instant' });
-        update();
+        settle();
       }, 140);
     });
-    document.fonts.ready.then(() => { if (enhanced) { experience.resize(layout()); if (reader.active) reader.resize(); else update(); } });
+    document.fonts.ready.then(() => { if (enhanced) { experience.resize(layout()); if (reader.active) reader.resize(); else settle(); } });
     document.addEventListener('themechange', event => experience.setTheme(event.detail));
-    const onMotion = () => { experience.setReducedMotion(motion.matches); update(); };
+    const onMotion = () => { experience.setReducedMotion(motion.matches); settle(); };
     if (motion.addEventListener) motion.addEventListener('change', onMotion);
     else motion.addListener?.(onMotion);
     canvas.addEventListener('particlestatechange', () => {
@@ -214,6 +269,16 @@ async function initialize() {
       experience.pulse(event.clientX, event.clientY, 1.1);
     }, { passive: true });
     addEventListener('pointerup', event => { if (event.pointerType === 'touch') experience.clearPointer(); }, { passive: true });
+    // Hover and focus light up the particle drawing that frames the control.
+    const bindHighlight = (element, name, events = ['pointerenter', 'pointerleave', 'focusin', 'focusout']) => {
+      if (!element) return;
+      const [on, off, focusOn, focusOff] = events;
+      element.addEventListener(on, () => experience.setHighlight(name, 1));
+      element.addEventListener(off, () => { if (!element.contains(document.activeElement)) experience.setHighlight(name, 0); });
+      element.addEventListener(focusOn, () => experience.setHighlight(name, 1));
+      element.addEventListener(focusOff, () => experience.setHighlight(name, 0));
+    };
+    bindHighlight(document.querySelector('[data-particle-final]'), 'pill');
     addEventListener('keydown', event => {
       if (!enhanced || suspended || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || document.querySelector('dialog[open]')) return;
       if (event.target.isContentEditable || event.target.closest('input,textarea,select,button,a')) return;
@@ -224,7 +289,7 @@ async function initialize() {
     });
     // Inspector only: no mutation API is exposed by the production page.
     Object.defineProperty(window, '__particleStory', { value: {
-      get state() { return { ...experience.metrics, scene: current, progress, enhanced }; },
+      get state() { return { ...experience.metrics, scene: current, progress: rendered, target, enhanced }; },
       sample() { return experience.sample(); },
     }, configurable: true });
   } catch (error) {
