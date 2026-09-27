@@ -4,6 +4,13 @@ const graphemeSegmenter = globalThis.Intl?.Segmenter
   ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
   : null;
 
+// Computed styles report font-stretch as a percentage; canvas only accepts keywords.
+const STRETCH = {
+  '50%': 'ultra-condensed', '62.5%': 'extra-condensed', '75%': 'condensed', '87.5%': 'semi-condensed',
+  '100%': 'normal', '112.5%': 'semi-expanded', '125%': 'expanded', '150%': 'extra-expanded', '200%': 'ultra-expanded',
+};
+const canvasStretch = value => STRETCH[value] || (Object.values(STRETCH).includes(value) ? value : 'normal');
+
 const emptyCapture = (width, height) => ({
   points: new Float32Array(0),
   count: 0,
@@ -116,7 +123,7 @@ export function captureArticleGlyphs(element, {
     let hidden = false;
     for (let current = node; current; current = current.parentElement) {
       if (ignoredTags.has(current.tagName)
-        || current.matches?.('.code-copy,.visually-hidden,[aria-hidden="true"]')
+        || current.matches?.('.code-copy,.heading-anchor,.visually-hidden,[aria-hidden="true"]')
         || styleFor(current).display === 'none'
         || ['hidden', 'collapse'].includes(styleFor(current).visibility)) {
         hidden = true;
@@ -175,7 +182,8 @@ export function captureArticleGlyphs(element, {
     if (context.fillStyle !== style.color) context.fillStyle = style.color;
     if (context.direction !== style.direction) context.direction = style.direction;
     if ('fontKerning' in context && context.fontKerning !== style.fontKerning) context.fontKerning = style.fontKerning;
-    if ('fontStretch' in context && context.fontStretch !== style.fontStretch) context.fontStretch = style.fontStretch;
+    const stretch = canvasStretch(style.fontStretch);
+    if ('fontStretch' in context && context.fontStretch !== stretch) context.fontStretch = stretch;
     if ('fontVariantCaps' in context && context.fontVariantCaps !== style.fontVariantCaps) context.fontVariantCaps = style.fontVariantCaps;
     if ('textRendering' in context && context.textRendering !== style.textRendering) context.textRendering = style.textRendering;
     const fontKey = `${font}\u0000${style.fontKerning}\u0000${style.fontStretch}\u0000${style.fontVariantCaps}`;

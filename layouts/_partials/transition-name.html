@@ -1,0 +1,2 @@
+{{- /* Shared view-transition-name for a record title on lists and on its own page. */ -}}
+{{- return printf "t-%s" (substr (md5 .RelPermalink) 0 12) -}}

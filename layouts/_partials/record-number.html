@@ -1,0 +1,6 @@
+{{- /* Stable record number: position in the section, oldest first (ties keep weight order). */ -}}
+{{- $number := 0 -}}
+{{- range $i, $p := (where site.RegularPages "Section" .Section).ByDate -}}
+{{- if eq $p.RelPermalink $.RelPermalink -}}{{- $number = add $i 1 -}}{{- end -}}
+{{- end -}}
+{{- return $number -}}

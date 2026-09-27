@@ -1,5 +1,5 @@
 {{ if eq .Section "notes" }}
-{{ $notes := (where site.RegularPages "Section" "notes").ByWeight }}
+{{ $notes := (where site.RegularPages "Section" "notes").ByDate }}
 {{ $current := . }}
 {{ range $index, $note := $notes }}{{ if eq $note.RelPermalink $current.RelPermalink }}
 <nav class="article-pagination" aria-label="노트 넘기기" data-note-position="{{ $index }}" data-note-count="{{ len $notes }}">

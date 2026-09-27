@@ -3,6 +3,8 @@ import { createArticleReader } from './article-reader.js';
 
 const article = document.querySelector('article.article:has(.article-pagination)');
 const motion = matchMedia('(prefers-reduced-motion: reduce)');
+const reveal = () => document.documentElement.classList.remove('reader-pending');
+if (!article || motion.matches) reveal();
 if (article && !motion.matches) {
   const canvas = document.createElement('canvas');
   canvas.id = 'reader-particles';
@@ -14,6 +16,7 @@ if (article && !motion.matches) {
     engine.setTheme(document.documentElement.dataset.theme);
     if (engine.metrics.renderer === 'static') throw new Error('No particle renderer');
     const reader = createArticleReader({ engine, initialArticle: article });
+    reveal();
     let timer;
     addEventListener('resize', () => {
       clearTimeout(timer);
@@ -25,5 +28,6 @@ if (article && !motion.matches) {
   } catch {
     engine?.destroy();
     canvas.remove();
+    reveal();
   }
 }

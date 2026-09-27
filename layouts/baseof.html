@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#141413">
-  <script>try{const t=localStorage.getItem('alcedo-theme');if(t==='paper')document.documentElement.dataset.theme=t}catch{}</script>
+  <script>try{const t=localStorage.getItem('alcedo-theme');if(t==='paper')document.documentElement.dataset.theme=t}catch{}addEventListener('pagereveal',e=>{const v=e.viewTransition;if(v)for(const p of[v.ready,v.finished,v.updateCallbackDone])p&&p.catch(()=>{})})</script>
   <title>{{ if not .IsHome }}{{ .Title }} · {{ end }}{{ site.Title }}</title>
   {{ $description := .Params.summary | default .Description | default site.Params.description }}
   <meta name="description" content="{{ $description }}">
@@ -32,9 +32,15 @@
   <link rel="stylesheet" href="{{ $storyCSS.RelPermalink }}" integrity="{{ $storyCSS.Data.Integrity }}">
   {{ $experience := resources.Get "js/experience.js" | js.Build (dict "targetPath" "js/experience.js" "format" "esm" "target" "es2020" "minify" true) | fingerprint }}
   <script type="module" src="{{ $experience.RelPermalink }}" integrity="{{ $experience.Data.Integrity }}"></script>
-  {{ else if and .IsPage (eq .Section "notes") }}
+  {{ else }}
+  {{ if and .IsPage (eq .Section "notes") }}
+  {{/* Hide the static note until the reader mounts, so it never flashes a second layout. */}}
+  <script>try{if(!matchMedia('(prefers-reduced-motion: reduce)').matches){document.documentElement.classList.add('reader-pending');setTimeout(()=>document.documentElement.classList.remove('reader-pending'),2500)}}catch{}</script>
   {{ $reader := resources.Get "js/article-page.js" | js.Build (dict "targetPath" "js/article-page.js" "format" "esm" "target" "es2020" "minify" true) | fingerprint }}
   <script type="module" src="{{ $reader.RelPermalink }}" integrity="{{ $reader.Data.Integrity }}"></script>
+  {{ end }}
+  {{ $mark := resources.Get "js/kingfisher-mark.js" | js.Build (dict "targetPath" "js/kingfisher-mark.js" "format" "esm" "target" "es2020" "minify" true) | fingerprint }}
+  <script type="module" src="{{ $mark.RelPermalink }}" integrity="{{ $mark.Data.Integrity }}"></script>
   {{ end }}
 </head>
 <body{{ if .IsHome }} class="story-home"{{ end }} data-search-index="{{ "index.json" | relURL }}">

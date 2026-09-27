@@ -54,7 +54,7 @@ const BIRD_WIDTH = 705;
 
 let silhouette = null;
 /** Sample the silhouette once in design space: x, y, r, g, b, region per point. */
-function designSamples() {
+export function designSamples() {
   if (silhouette) return silhouette;
   const canvas = document.createElement('canvas');
   canvas.width = 4;
@@ -116,6 +116,9 @@ function designSamples() {
   silhouette = new Float32Array(points);
   return silhouette;
 }
+
+/** Anatomy shared with the small kingfisher marks on the static pages. */
+export const ANATOMY = Object.freeze({ billTip: BILL_TIP, tailTip: TAIL_TIP, neck: NECK, tailBase: TAIL_BASE, feet: FEET, perchY: PERCH_Y, width: BIRD_WIDTH, centreX: BIRD_CENTRE_X });
 
 const rotateAbout = (x, y, cx, cy, angle, out) => {
   const cos = Math.cos(angle);

@@ -6,6 +6,7 @@ timeZone = 'Asia/Seoul'
 hasCJKLanguage = true
 enableRobotsTXT = true
 summaryLength = 100
+titleCaseStyle = 'none'
 
 [params]
   author = 'Alcedo'
