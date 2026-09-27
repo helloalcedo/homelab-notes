@@ -18,7 +18,7 @@
 
 - `assets/js/particles.js`: 하나의 입자 풀, WebGL·Canvas 2D 렌더러, 장면 사이의 슬롯 배정, 포인터·파문 변위, 수면 반영 패스, 글 읽기 전환
 - `assets/js/morph.js`: Knothe–Rosenblatt 순위 대응, 5차 이징, 비행 곡선
-- `assets/js/scenes/kingfisher.js`: 00 장면의 물총새·가지·수면과 00→01 잠수
+- `assets/js/scenes/kingfisher.js`: 00 장면의 `Alcedo` 제목·가지·수면·물보라, 그리고 모든 장면을 따라다니는 동반자 물총새(연못 잠수, 장면 사이 비행, 검색 알약으로의 잠수)
 - `assets/js/scenes/story.js`, `assets/js/scenes/shapes.js`: 01–05 장면의 형태
 - `assets/js/experience.js`, `assets/css/experience.css`: 스크롤 스프링, 장면 문구의 등장·퇴장, 접근성, 대체 경로
 - `assets/js/kingfisher-mark.js`: 정적 페이지 푸터·소개·404의 작은 입자 물총새
@@ -27,7 +27,7 @@
 
 물총새의 윤곽은 이 사이트를 위해 새로 그린 벡터 경로(1000×700 설계 좌표, `scenes/kingfisher.js`의 `PATHS`)다. 사진이나 다른 작품을 따라 그리지 않았다. 장면 순서는 다음과 같다.
 
-1. 가지 위의 물총새와 수면, 반영
+1. 가운데의 `Alcedo` 제목, 오른쪽 아래 가지 위의 작은 물총새와 수면, 반영
 2. 네트워크 트리
 3. 프로젝트 위젯과 `hugo.toml` 코드
 4. 노트 두 장
@@ -38,7 +38,7 @@
 
 ## Continuous-pool contract
 
-여섯 장면은 서로 다른 입자 인스턴스를 만들지 않는다. breakpoint가 바뀌어 pool을 다시 할당하는 경우를 제외하면 같은 particle buffer가 장면 진행값에 따라 다음 target으로 이동한다. 첫 진입에는 입자 물총새만 보이고, 헤더와 장면 내비게이션은 첫 장면을 벗어난 뒤 나타난다.
+여섯 장면은 서로 다른 입자 인스턴스를 만들지 않는다. breakpoint가 바뀌어 pool을 다시 할당하는 경우를 제외하면 같은 particle buffer가 장면 진행값에 따라 다음 target으로 이동한다. 첫 진입에는 입자 제목 `Alcedo`와 작은 입자 물총새만 보이고, 헤더와 장면 내비게이션은 첫 장면을 벗어난 뒤 나타난다. 제목의 글꼴·크기·위치는 이 저장소의 원래 홈(`main`)과 같다. 물총새는 풀의 14%(최소 360개)를 자기 몫으로 계속 쓰며 장면 사이의 슬롯 배정에서 빠지고, 여섯 장면 내내 같은 입자로 남는다.
 
 DOM section은 캔버스가 담당하지 않는 제목, 설명, 링크, 검색 입력과 접근성 이름을 제공한다. WebGL을 사용할 수 없으면 Canvas 2D renderer를 시도하고, renderer가 준비되지 않거나 초기화가 실패하면 향상 클래스를 제거해 이 section을 일반 문서 흐름으로 되돌리는 것이 설계 계약이다. reduced motion에서는 animation loop 대신 현재 target의 정적 frame을 사용한다.
 
