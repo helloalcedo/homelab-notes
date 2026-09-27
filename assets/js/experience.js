@@ -1,6 +1,5 @@
 import { ParticleExperience } from './particles.js';
 import { createArticleReader } from './article-reader.js';
-import { stepChapterProgress } from './chapter-transition.js';
 
 const root = document.documentElement;
 const canvas = document.querySelector('#story-particles');
@@ -13,9 +12,8 @@ const stops = [0, 1.35, 2.45, 3.25, 4.55, 5.25];
 const end = 5.82;
 let experience, enhanced = false, progress = 0, current = 0, scheduled = false;
 let resizing = 0, hashTimer = 0, pendingFocus = null, ready = false;
-let resizeProgress = 0, resizeDestination = null, scrollDestination = 0;
+let resizeProgress = 0, resizeDestination = null;
 let reader, suspended = false;
-let lastPresentation = 0;
 const homePath = location.pathname;
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
@@ -25,9 +23,7 @@ const rect = selector => {
   const element = typeof selector === 'string' ? document.querySelector(selector) : selector;
   if (!element) return null;
   const box = element.getBoundingClientRect();
-  const label = element.querySelector('.frame-label');
-  return { x: box.x, y: box.y, width: box.width, height: box.height,
-    headerOffset: label ? label.getBoundingClientRect().bottom - box.top + 9 : undefined };
+  return { x: box.x, y: box.y, width: box.width, height: box.height };
 };
 const layout = () => ({
   code: rect('[data-particle-code]'), project: rect('[data-particle-project]'),
@@ -36,19 +32,14 @@ const layout = () => ({
 });
 const hashScene = () => panels.findIndex(panel => '#' + panel.id === location.hash);
 
-function update(now = performance.now(), snap = false) {
+function update() {
   scheduled = false;
   if (!enhanced || suspended || resizing) return;
-  const destination = clamp(scrollY / maxScroll() * end, 0, end);
-  scrollDestination = destination;
-  const elapsed = lastPresentation ? now - lastPresentation : 16.667;
-  lastPresentation = now;
-  progress = snap || !ready || motion.matches ? destination : stepChapterProgress(progress, destination, elapsed);
+  resizeDestination = null;
+  progress = clamp(scrollY / maxScroll() * end, 0, end);
   const scene = Math.min(panels.length - 1, Math.floor(progress));
   const local = progress - scene;
-  const arrival = scene === 0 ? 1 : smooth(0, .16, local);
-  const departure = scene === 5 ? 1 : 1 - smooth(.64, .96, local);
-  const opacity = motion.matches ? 1 : arrival * departure;
+  const opacity = motion.matches || scene === 5 ? 1 : 1 - smooth(.77, .98, local);
   const intro = progress < .06;
   if (intro && (header.contains(document.activeElement) || navigation.contains(document.activeElement))) {
     const title = panels[0].querySelector('h1');
@@ -71,12 +62,10 @@ function update(now = performance.now(), snap = false) {
     }
     panel.classList.toggle('is-active', active);
     panel.style.opacity = active ? opacity : 0;
-    panel.style.setProperty('--copy-offset', `${motion.matches ? 0 : (1 - arrival) * 14 - (1 - departure) * 8}px`);
     panel.inert = !accessible;
     panel.setAttribute('aria-hidden', String(!accessible));
   });
   if (current !== scene || !ready) {
-    experience.setFrameFocus(null);
     current = scene;
     chapters.forEach((link, index) => index === scene ? link.setAttribute('aria-current', 'step') : link.removeAttribute('aria-current'));
   }
@@ -88,9 +77,6 @@ function update(now = performance.now(), snap = false) {
   }
   experience.setProgress(motion.matches ? (scene === 0 ? 0 : stops[scene]) : progress);
   ready = true;
-  if (progress !== destination) { requestUpdate(); return; }
-  resizeDestination = null;
-  lastPresentation = 0;
   clearTimeout(hashTimer);
   hashTimer = setTimeout(() => {
     if (!enhanced || suspended || location.pathname !== homePath) return;
@@ -129,7 +115,6 @@ function fallback() {
     panel.inert = false;
     panel.removeAttribute('aria-hidden');
     panel.style.removeProperty('opacity');
-    panel.style.removeProperty('--copy-offset');
     panel.classList.remove('is-active');
   });
   panels[current]?.scrollIntoView({ behavior: 'instant' });
@@ -142,7 +127,7 @@ function enhance() {
   window.history.scrollRestoration = 'manual';
   experience.resize(layout());
   scrollTo({ top: maxScroll() * progress / end, behavior: 'instant' });
-  update(performance.now(), true);
+  update();
 }
 
 async function initialize() {
@@ -179,7 +164,7 @@ async function initialize() {
         if (experience.metrics.renderer === 'static') { current = scene; fallback(); return; }
         experience.resize(layout());
         scrollTo({ top: maxScroll() * destination / end, behavior: 'instant' });
-        update(performance.now(), true);
+        update();
       },
     });
 
@@ -188,14 +173,6 @@ async function initialize() {
       event.preventDefault();
       goToScene(Number(link.dataset.scene), { focus: event.detail === 0 });
     }));
-    // One quiet caption above the rail keeps labels clear of the note sheets.
-    const updateNavigationLabel = () => {
-      const link = navigation.querySelector('a:focus-visible') || navigation.querySelector('a:hover');
-      navigation.querySelector('.scene-name').textContent = link?.dataset.sceneName || '';
-      navigation.classList.toggle('is-labelled', Boolean(link));
-    };
-    for (const event of ['pointerover', 'pointerleave', 'focusin']) navigation.addEventListener(event, updateNavigationLabel);
-    navigation.addEventListener('focusout', () => requestAnimationFrame(updateNavigationLabel));
     addEventListener('scroll', requestUpdate, { passive: true });
     addEventListener('hashchange', () => { if (reader.active || reader.loading || location.pathname !== homePath) return; const scene = hashScene(); if (scene >= 0) goToScene(scene, { history: false, instant: true }); });
     addEventListener('popstate', () => { if (reader.active || reader.loading || location.pathname !== homePath) return; const scene = hashScene(); goToScene(scene >= 0 ? scene : 0, { history: false, instant: true }); });
@@ -203,7 +180,7 @@ async function initialize() {
       // Resize can clamp scrollY before its scroll event arrives. Keep the last
       // scene position until layout is rebuilt instead of treating that as input.
       clearTimeout(hashTimer);
-      if (!resizing) resizeProgress = scrollDestination;
+      if (!resizing) resizeProgress = progress;
       clearTimeout(resizing);
       resizing = setTimeout(() => {
         resizing = 0;
@@ -213,7 +190,7 @@ async function initialize() {
         if (reader.active) { experience.resize(layout()); reader.resize(); return; }
         experience.resize(layout());
         scrollTo({ top: maxScroll() * destination / end, behavior: 'instant' });
-        update(performance.now(), true);
+        update();
       }, 140);
     });
     document.fonts.ready.then(() => { if (enhanced) { experience.resize(layout()); if (reader.active) reader.resize(); else update(); } });
@@ -229,16 +206,8 @@ async function initialize() {
     });
     addEventListener('pointermove', event => {
       if (suspended || event.pointerType === 'touch' || document.querySelector('dialog[open]')) return;
-      const frame = event.target.closest('[data-reader-frame]');
-      if (frame) experience.setPointer(-2000, -2000);
-      else experience.setPointer(event.clientX, event.clientY);
-      experience.setFrameFocus(frame ? rect(frame) : null);
+      experience.setPointer(event.clientX, event.clientY);
     }, { passive: true });
-    addEventListener('focusin', event => {
-      if (suspended) return;
-      const frame = event.target.closest('[data-reader-frame]');
-      experience.setFrameFocus(frame ? rect(frame) : null);
-    });
     addEventListener('pointerout', event => { if (!event.relatedTarget) experience.clearPointer(); }, { passive: true });
     addEventListener('pointerdown', event => {
       if (suspended || event.button !== 0 || event.target.closest('a,button,input,dialog')) return;
@@ -248,7 +217,7 @@ async function initialize() {
     addEventListener('keydown', event => {
       if (!enhanced || suspended || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || document.querySelector('dialog[open]')) return;
       if (event.target.isContentEditable || event.target.closest('input,textarea,select,button,a')) return;
-      const destination = { ArrowDown: current + 1, PageDown: current + 1, ArrowUp: current - 1, PageUp: current - 1, Home: 0, End: panels.length - 1 }[event.key];
+      const destination = { ArrowDown: current + 1, PageDown: current + 1, ArrowUp: current - 1, PageUp: current - 1, Home: 0, End: 5 }[event.key];
       if (destination === undefined) return;
       event.preventDefault();
       goToScene(destination, { focus: true });

@@ -242,7 +242,7 @@
   flex-wrap: wrap;
   gap: 7px 20px;
   color: var(--muted);
-  font: 400 11px / 1.55 var(--mono);
+  font: 400 9px / 1.5 var(--mono);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -281,59 +281,47 @@
   min-width: 0;
   padding-top: 3px;
   color: var(--muted);
-  font: 400 13px / 1.65 var(--korean);
+  font: 400 11px / 1.65 var(--korean);
 }
 
 .article .toc details {
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
-  padding-block: 2px 8px;
+  padding-block: 13px;
 }
 
 .article .toc summary {
   cursor: pointer;
   color: var(--fg);
-  min-height: 44px;
-  padding-block: 14px 10px;
-  font: 400 10.5px / 1.45 var(--mono);
+  font: 400 9px / 1.4 var(--mono);
   letter-spacing: 0.1em;
   list-style-position: inside;
   text-transform: uppercase;
 }
 
 .article .toc nav > ul {
-  margin: 6px 0 3px;
+  margin: 16px 0 3px;
   padding: 0;
   list-style: none;
 }
 
 .article .toc nav ul ul {
-  margin-top: 2px;
-  padding-left: 14px;
+  margin-top: 6px;
+  padding-left: 13px;
   list-style: none;
 }
 
 .article .toc nav li {
-  margin: 0;
+  margin-block: 7px;
 }
 
 .article .toc nav a {
-  display: flex;
-  align-items: center;
-  min-height: 38px;
-  padding: 6px 8px 6px 14px;
-  border-inline-start: 1px solid transparent;
+  display: inline-block;
   color: var(--muted);
 }
 
-.article .toc nav a:hover,
-.article .toc nav a:focus-visible {
+.article .toc nav a:hover {
   color: var(--accent);
-}
-
-.article .toc nav a[aria-current="location"] {
-  border-inline-start-color: var(--accent);
-  color: var(--fg);
 }
 
 .article .repository-link {
@@ -342,32 +330,8 @@
   gap: 10px;
   margin-top: 18px;
   color: var(--accent);
-  min-height: 44px;
-  font: 400 10.5px / 1.5 var(--mono);
+  font: 400 9px / 1.5 var(--mono);
   letter-spacing: 0.07em;
-}
-
-.reading-progress {
-  position: fixed;
-  inset: 0 0 auto;
-  z-index: 30;
-  height: 2px;
-  overflow: hidden;
-  pointer-events: none;
-  background: var(--line);
-}
-
-.reading-progress[hidden] {
-  display: none;
-}
-
-.reading-progress > span {
-  display: block;
-  width: 100%;
-  height: 100%;
-  background: var(--accent);
-  transform: scaleX(0);
-  transform-origin: left center;
 }
 
 .article .repository-link .arrow {
@@ -1100,10 +1064,6 @@
     overflow-y: auto;
   }
 
-  .article .toc nav a {
-    min-height: 44px;
-  }
-
   .article .prose {
     font-size: 16px;
     line-height: 1.9;
@@ -1270,7 +1230,6 @@
   }
 
   .article .toc,
-  .reading-progress,
   .article .article-actions,
   .article .article-tags,
   .article .copy-status,

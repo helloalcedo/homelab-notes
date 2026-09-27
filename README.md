@@ -30,7 +30,7 @@
 
 ## 로컬에서 쓰기
 
-[Hugo 0.166.0](https://github.com/gohugoio/hugo/releases/tag/v0.166.0)과 Python 3, Node.js 22 이상을 준비합니다. 이 사이트는 Hugo extended 기능이나 Node.js 패키지를 요구하지 않습니다.
+[Hugo 0.166.0](https://github.com/gohugoio/hugo/releases/tag/v0.166.0)과 Python 3을 준비합니다. 이 사이트는 Hugo extended 기능이나 Node.js 패키지를 요구하지 않습니다.
 
 ```sh
 make serve

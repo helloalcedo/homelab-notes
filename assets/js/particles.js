@@ -1,5 +1,4 @@
 import { READER_MOTION, smoother } from './reader-motion.js';
-import { CHAPTER_MOTION, createChapterFlow, blendChapterTransition } from './chapter-transition.js';
 
 const TAU = Math.PI * 2;
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
@@ -23,7 +22,6 @@ function copyRect(rect, canvasRect) {
     y: (rect.y ?? rect.top) - canvasRect.top,
     width: rect.width,
     height: rect.height,
-    headerOffset: rect.headerOffset,
   };
 }
 
@@ -71,9 +69,6 @@ export class ParticleExperience {
     this.theme = 'ink';
     this.reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.pointer = { x: -2000, y: -2000 };
-    this.focusFrame = null;
-    this.focusAmount = 0;
-    this.focusTarget = 0;
     this.waves = [];
     this.time = 0;
     this.last = performance.now();
@@ -110,7 +105,7 @@ export class ParticleExperience {
     queueMicrotask(() => { if (!this.destroyed) this._dispatchState(); });
     document.fonts?.load?.('italic 180px Instrument', this.titleText).then(() => {
       if (this.destroyed) return;
-      this._buildGeometry();
+      this._makeTitle();
       if (this.pageTurn) this._renderPageTurn();
       else if (this.documentMorph) this._renderDocumentMorph();
       else if (this.reduced) this._snapToTargets();
@@ -127,7 +122,6 @@ export class ParticleExperience {
       running: Boolean(this.raf),
       reduced: this.reduced,
       fps: this.fps,
-      focusedFrame: Boolean(this.focusTarget),
       poolVersion: this.poolVersion,
       documentMorph: this.documentMorph ? this.documentMorph.amount : null,
       pageTurn: this.pageTurn ? this.pageTurn.amount : null,
@@ -209,8 +203,7 @@ export class ParticleExperience {
   }
 
   setProgress(value) {
-    const next = clamp(Number(value) || 0, 0, 5.82);
-    this.progress = next;
+    this.progress = clamp(Number(value) || 0, 0, 5.82);
     if (this.pageTurn) this._renderPageTurn();
     else if (this.documentMorph) this._renderDocumentMorph();
     else if (this.reduced) this._snapToTargets();
@@ -250,21 +243,10 @@ export class ParticleExperience {
     return this;
   }
 
-  setFrameFocus(rect) {
-    const next = rect ? copyRect(rect, this.canvas.getBoundingClientRect()) : null;
-    const target = next ? 1 : 0;
-    if (this.focusTarget === target && (!next || ['x', 'y', 'width', 'height'].every(key => next[key] === this.focusFrame?.[key]))) return this;
-    if (next) this.focusFrame = next;
-    this.focusTarget = target;
-    if (this.reduced) { this.focusAmount = this.focusTarget; this._renderStatic(); }
-    else this._wake();
-    return this;
-  }
-
   clearPointer() {
     this.pointer.x = -2000;
     this.pointer.y = -2000;
-    this.setFrameFocus(null);
+    if (!this.reduced) this._wake();
     return this;
   }
 
@@ -559,11 +541,9 @@ export class ParticleExperience {
     const code = this.layout.code || { x: w * 0.08, y: h * 0.34, width: w * 0.34, height: h * 0.36 };
     const headerOffset = this.mobile ? 30 : 44;
     this._sampleRounded(this.projectPoints, project, 16);
-    const projectHeader = project.y + (project.headerOffset ?? headerOffset);
-    this._sampleLine(this.projectPoints, project.x + 14, projectHeader, project.x + project.width - 14, projectHeader, 520);
+    this._sampleLine(this.projectPoints, project.x + 14, project.y + headerOffset, project.x + project.width - 14, project.y + headerOffset, 520);
     this._sampleRounded(this.projectPoints, code, 10);
-    const codeHeader = code.y + (code.headerOffset ?? headerOffset);
-    this._sampleLine(this.projectPoints, code.x + 14, codeHeader, code.x + code.width - 14, codeHeader, 420);
+    this._sampleLine(this.projectPoints, code.x + 14, code.y + headerOffset, code.x + code.width - 14, code.y + headerOffset, 420);
 
     const notes = this.layout.notes.length ? this.layout.notes : [
       { x: w * 0.16, y: h * 0.28, width: w * 0.28, height: h * 0.46 },
@@ -571,8 +551,7 @@ export class ParticleExperience {
     ];
     for (const note of notes.slice(0, 2)) {
       this._sampleRounded(this.notePoints, note, 5);
-      const noteHeader = note.y + (note.headerOffset ?? headerOffset);
-      this._sampleLine(this.notePoints, note.x + 14, noteHeader, note.x + note.width - 14, noteHeader, 360);
+      this._sampleLine(this.notePoints, note.x + 14, note.y + headerOffset, note.x + note.width - 14, note.y + headerOffset, 360);
       const fold = Math.min(20, note.width * 0.12, note.height * 0.12);
       this._sampleLine(this.notePoints, note.x + note.width - fold, note.y, note.x + note.width, note.y + fold, 90);
     }
@@ -587,51 +566,6 @@ export class ParticleExperience {
     this._sampleRounded(this.finalPoints, finalRect, finalRect.height / 2);
     this._sampleRounded(this.finalPoints, finalButton, Math.min(finalButton.width, finalButton.height) / 2);
     this._buildFlow();
-    this._buildChapterPaths();
-  }
-
-  _buildChapterPaths() {
-    // Pair spatial neighbours instead of pairing arbitrary perimeter indices.
-    // Each map is a permutation: the complete original static design is kept.
-    const start = Math.ceil(this.count * .09);
-    const stops = [0, .35, .45, .25, .55, .25];
-    const target = [0, 0, 0, 0, 0];
-    const orders = [];
-    for (let stage = 0; stage < 6; stage++) {
-      const keys = new Uint32Array(this.count);
-      for (let i = start; i < this.count; i++) {
-        this._target(stage, i, stops[stage], target);
-        keys[i] = mortonCode(target[0], target[1], 0, 0, this.width, this.height);
-      }
-      orders.push(Array.from({ length: this.count - start }, (_, i) => i + start)
-        .sort((a, b) => keys[a] - keys[b] || a - b));
-    }
-    this.chapterMaps = orders.map(order => {
-      const map = Uint32Array.from({ length: this.count }, (_, i) => i);
-      for (let rank = 0; rank < order.length; rank++) map[orders[0][rank]] = order[rank];
-      return map;
-    });
-    this.chapterFlows = [];
-    for (let chapter = 0; chapter < 5; chapter++) {
-      const from = new Float32Array(this.count * 5), to = new Float32Array(this.count * 5);
-      for (let i = 0; i < this.count; i++) {
-        this._chapterTarget(chapter, CHAPTER_MOTION.start, i, target);
-        from.set(target, i * 5);
-        this._chapterTarget(chapter + 1, CHAPTER_MOTION.end - 1, i, target);
-        to.set(target, i * 5);
-      }
-      this.chapterFlows.push(createChapterFlow(this.seed, this.width, this.height, from, to, chapter));
-    }
-    this.previousTargets = null;
-  }
-
-  _chapterTarget(stage, local, index, out) {
-    // Replace the old entry fade / exit spiral only inside the transition.
-    // Resting stops and the raw geometry generator remain unchanged.
-    if (stage === 2) local = Math.max(.34, local);
-    if (stage === 3) local = Math.min(CHAPTER_MOTION.start, local);
-    if (stage === 4) local = Math.max(.55, local);
-    this._target(stage, this.chapterMaps[stage][index], local, out);
   }
 
   _makeTitle() {
@@ -693,7 +627,7 @@ export class ParticleExperience {
   _buildFlow() {
     const w = this.width;
     const h = this.height;
-    const compact = this.mobile && h <= 800;
+    const compact = this.mobile && h <= 650;
     const centerY = this.mobile ? h * (compact ? 0.64 : 0.67) : h * 0.51;
     const left = this.mobile ? w * 0.12 : w * 0.47;
     const middle = this.mobile ? w * 0.51 : w * 0.68;
@@ -755,7 +689,7 @@ export class ParticleExperience {
     if (stage > 0 && index < this.count * 0.09) {
       out[0] = ((a * w + this.time * 0.003 * (b - 0.4)) % w + w) % w;
       out[1] = ((c * h + Math.sin(this.time * 0.0001 + a * 10) * 12) % h + h) % h;
-      out[3] = 0.025 + d * 0.045;
+      out[3] = 0.035 + d * 0.075;
       out[4] = 0.4 + d * 0.6;
       return;
     }
@@ -852,19 +786,6 @@ export class ParticleExperience {
     out[4] = 0.65 + d * 0.7;
   }
 
-  _sceneTarget(stage, local, index, target, next) {
-    if (this.reduced) { this._target(stage, index, local, target); return; }
-    let chapter = stage, position = local;
-    if (stage > 0 && local < CHAPTER_MOTION.end - 1) { chapter--; position++; }
-    if (chapter < 5 && position >= CHAPTER_MOTION.start && position <= CHAPTER_MOTION.end) {
-      this._chapterTarget(chapter, CHAPTER_MOTION.start, index, target);
-      this._chapterTarget(chapter + 1, CHAPTER_MOTION.end - 1, index, next);
-      if (chapter > 0 && index < this.count * .09) return;
-      blendChapterTransition(target, next, this.chapterFlows[chapter], index,
-        (position - CHAPTER_MOTION.start) / (CHAPTER_MOTION.end - CHAPTER_MOTION.start), target);
-    } else this._chapterTarget(stage, local, index, target);
-  }
-
   frame(now) {
     this.raf = 0;
     if (!this._canRun()) return;
@@ -887,38 +808,30 @@ export class ParticleExperience {
   _update(delta) {
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
-    // An exact critically damped spring settles without bouncing, including
-    // when frame intervals change. Pointer impulses share the same recovery.
-    const frequency = .19;
-    const decay = Math.exp(-frequency * delta);
-    this.focusAmount += (this.focusTarget - this.focusAmount) * (1 - Math.exp(-.12 * delta));
+    const transition = stage < 5 ? smooth(0.81, 1, local) : 0;
     const target = [0, 0, 0, 0, 0];
     const next = [0, 0, 0, 0, 0];
-    const previous = this.previousTargets;
-    if (!previous) this.previousTargets = new Float32Array(this.count * 2);
     this.waves = this.waves.filter(wave => this.time - wave.start < 1800);
     for (let i = 0; i < this.count; i += 1) {
       const q = i * 4;
-      this._sceneTarget(stage, local, i, target, next);
+      this._target(stage, i, local, target);
+      if (transition > 0) {
+        this._target(stage + 1, i, 0, next);
+        for (let value = 0; value < 5; value += 1) target[value] = mix(target[value], next[value], transition);
+      }
       if (this.first) {
         this.xyz[q] = target[0];
         this.xyz[q + 1] = target[1];
       }
-      // Advect the rendered particles with their path; spring only the pointer
-      // disturbance. A second position spring would drag old outlines behind it.
-      let x = previous ? this.xyz[q] + target[0] - previous[i * 2] : target[0];
-      let y = previous ? this.xyz[q + 1] + target[1] - previous[i * 2 + 1] : target[1];
-      this.previousTargets[i * 2] = target[0];
-      this.previousTargets[i * 2 + 1] = target[1];
+      let x = this.xyz[q];
+      let y = this.xyz[q + 1];
       let vx = this.xyz[q + 2];
       let vy = this.xyz[q + 3];
       const pointerX = x - this.pointer.x;
       const pointerY = y - this.pointer.y;
       const pointerDistance = Math.hypot(pointerX, pointerY);
       const pointerRadius = this.mobile ? 62 : 95;
-      // Interactive frames must keep matching their real links and inputs.
-      // Free-form scenes retain the tactile repulsion; frames use ink tint.
-      if ((stage === 0 || stage === 1 || stage === 4) && pointerDistance < pointerRadius && pointerDistance > 0.1) {
+      if (pointerDistance < pointerRadius && pointerDistance > 0.1) {
         const force = (1 - pointerDistance / pointerRadius) * 2.1;
         vx += (pointerX / pointerDistance) * force;
         vy += (pointerY / pointerDistance) * force;
@@ -935,13 +848,10 @@ export class ParticleExperience {
           vy += (dy / distance) * force;
         }
       }
-      const offsetX = x - target[0], offsetY = y - target[1];
-      const stepX = (vx + frequency * offsetX) * delta;
-      const stepY = (vy + frequency * offsetY) * delta;
-      x = target[0] + (offsetX + stepX) * decay;
-      y = target[1] + (offsetY + stepY) * decay;
-      vx = (vx - frequency * stepX) * decay;
-      vy = (vy - frequency * stepY) * decay;
+      vx = (vx + (target[0] - x) * 0.032 * delta) * Math.pow(0.79, delta);
+      vy = (vy + (target[1] - y) * 0.032 * delta) * Math.pow(0.79, delta);
+      x += vx * delta;
+      y += vy * delta;
       this.xyz[q] = x;
       this.xyz[q + 1] = y;
       this.xyz[q + 2] = vx;
@@ -960,10 +870,7 @@ export class ParticleExperience {
     const accentR = ink ? 0.89 : 0.63;
     const accentG = ink ? 0.53 : 0.25;
     const accentB = ink ? 0.38 : 0.17;
-    const frame = this.focusFrame;
-    const inFrame = frame && target[0] >= frame.x - 3 && target[0] <= frame.x + frame.width + 3
-      && target[1] >= frame.y - 3 && target[1] <= frame.y + frame.height + 3;
-    const warm = clamp(target[2] + (inFrame ? this.focusAmount * .85 : 0));
+    const warm = clamp(target[2]);
     this.buffer[offset] = x;
     this.buffer[offset + 1] = y;
     this.buffer[offset + 2] = target[4] * 1.6;
@@ -1297,13 +1204,17 @@ export class ParticleExperience {
 
   _snapToTargets(draw = true) {
     if (!this.xyz) return;
-    this.previousTargets = null;
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
+    const transition = stage < 5 ? smooth(0.81, 1, local) : 0;
     const target = [0, 0, 0, 0, 0];
     const next = [0, 0, 0, 0, 0];
     for (let i = 0; i < this.count; i += 1) {
-      this._sceneTarget(stage, local, i, target, next);
+      this._target(stage, i, local, target);
+      if (transition > 0) {
+        this._target(stage + 1, i, 0, next);
+        for (let value = 0; value < 5; value += 1) target[value] = mix(target[value], next[value], transition);
+      }
       const q = i * 4;
       this.xyz[q] = target[0];
       this.xyz[q + 1] = target[1];
@@ -1320,10 +1231,9 @@ export class ParticleExperience {
     const stage = Math.min(5, Math.floor(this.progress));
     const local = this.progress - stage;
     const target = [0, 0, 0, 0, 0];
-    const next = [0, 0, 0, 0, 0];
     for (let i = 0; i < this.count; i += 1) {
       const q = i * 4;
-      this._sceneTarget(stage, local, i, target, next);
+      this._target(stage, i, local, target);
       this._writeBuffer(i, this.xyz[q], this.xyz[q + 1], target);
     }
     this._draw();

@@ -31,7 +31,6 @@ esac
 
 cd "$project_dir"
 python3 -m unittest discover -s scripts/tests -p 'test_*.py'
-node --test scripts/tests/*.test.mjs
 
 "$hugo_bin" \
   --environment production \
