@@ -1,5 +1,6 @@
 import { READER_MOTION, smoother } from './reader-motion.js';
 import { createFolioField, createFolioPaths, blendFolioParticle } from './particle-flow.js';
+import { createNetworkField, createNetworkPaths } from './network-flow.js';
 
 const TAU = Math.PI * 2;
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
@@ -65,8 +66,6 @@ export class ParticleExperience {
     this.dpr = 1;
     this.mobile = false;
     this.progress = 0;
-    this.temperature = 0.3;
-    this.effort = 2;
     this.theme = 'ink';
     this.reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.pointer = { x: -2000, y: -2000 };
@@ -556,7 +555,9 @@ export class ParticleExperience {
       { x: w * 0.16, y: h * 0.28, width: w * 0.28, height: h * 0.46 },
       { x: w * 0.56, y: h * 0.28, width: w * 0.28, height: h * 0.46 },
     ];
+    this.networkField = createNetworkField(this.edges, this.seed, w);
     this.projectField = createFolioField([project], this.seed, w, h);
+    this.networkPaths = createNetworkPaths(this.networkField, this.projectField, this.edges, this.seed, w);
     this.noteField = createFolioField(notes.slice(0, 2), this.seed, w, h);
     this.folioPaths = createFolioPaths(this.projectField, this.noteField, this.seed, w);
 
@@ -601,21 +602,23 @@ export class ParticleExperience {
     this.edges = [];
     this.treeNodes = [];
     const startX = this.mobile ? w * 0.10 : w * 0.455;
-    const endX = this.mobile ? w * 0.91 : w * 0.91;
-    const centerY = this.mobile ? h * 0.66 : h * 0.515;
-    const spread = this.mobile ? h * 0.20 : h * 0.325;
+    const endX = w * .91;
+    const levels = this.mobile ? 2 : 3;
+    const compact = this.mobile && h <= 800;
+    const centerY = this.mobile ? h * (compact ? .72 : .66) : h * .515;
+    const spread = this.mobile ? h * (compact ? .13 : .20) : h * .325;
     this.treeCenter = { x: startX, y: centerY };
     const root = { x: startX, y: centerY, id: 0 };
     this.treeNodes.push(root);
     let id = 1;
     const walk = (node, depth, min, max, chosen) => {
-      if (depth === 4) return;
+      if (depth === levels) return;
       const branches = depth === 0 ? 3 : 2;
       for (let j = 0; j < branches; j += 1) {
         const low = min + ((max - min) * j) / branches;
         const high = min + ((max - min) * (j + 1)) / branches;
         const destination = {
-          x: mix(startX, endX, (depth + 1) / 4) + (depth === 3 ? 0 : (random() - 0.5) * w * 0.02),
+          x: mix(startX, endX, (depth + 1) / levels) + (depth === levels - 1 ? 0 : (random() - 0.5) * w * 0.02),
           y: centerY + ((low + high) / 2) * spread + (random() - 0.5) * spread * 0.045,
           id: id++,
         };
@@ -707,26 +710,8 @@ export class ParticleExperience {
       return;
     }
 
-    if (stage === 1) {
-      const edge = this.edges[Math.floor(a * this.edges.length)];
-      const amount = (b + this.time * 0.000006 * (0.4 + c)) % 1;
-      const eased = amount * amount * (3 - 2 * amount);
-      const spread = (0.35 + c * 1.4) * (1 + (this.effort < 2 ? (2 - this.effort) * 0.6 : 0));
-      out[0] = mix(edge.a.x, edge.b.x, amount) + Math.sin(d * TAU + this.time * 0.001) * spread;
-      out[1] = mix(edge.a.y, edge.b.y, eased) + Math.cos(c * TAU + this.time * 0.001) * spread;
-      if (edge.selected && (edge.depth + amount) / 4 < smooth(0.3, 0.92, local) * 1.2) out[2] = 0.8;
-      out[3] = mix(0.70, edge.selected ? 0.85 : 0.12, smooth(0.58, 0.91, local)) * (0.4 + d * 0.6);
-      out[4] = 0.65 + d * 0.65;
-      if (this.effort < 4 && edge.depth === 3 && c > (this.effort + 1) / 5) {
-        out[0] += (c - 0.4) * 42;
-        out[1] += (d - 0.5) * 45;
-        out[3] *= 0.4;
-      }
-      return;
-    }
-
-    if (stage === 2 || stage === 3) {
-      const field = stage === 2 ? this.projectField : this.noteField;
+    if (stage === 1 || stage === 2 || stage === 3) {
+      const field = stage === 1 ? this.networkField : stage === 2 ? this.projectField : this.noteField;
       const k = index * 5;
       for (let j = 0; j < 5; j++) out[j] = field[k + j];
       const breath = this.reduced ? 0 : 1;
@@ -770,7 +755,15 @@ export class ParticleExperience {
   _sceneTarget(stage, local, index, target, next) {
     this._target(stage, index, local, target);
     if (this.reduced) return;
-    if (stage === 2 && local > .38) {
+    if (stage === 1 && local > .40) {
+      if (index >= this.count * .09) {
+        const k = index * 5;
+        for (let j = 0; j < 5; j++) next[j] = this.projectField[k + j];
+        next[0] += target[0] - this.networkField[k];
+        next[1] += target[1] - this.networkField[k + 1];
+        blendFolioParticle(target, next, this.networkPaths, index, local, this.seed[index * 4 + 2], target);
+      }
+    } else if (stage === 2 && local > .38) {
       // Ambient grains keep their quiet drift instead of joining the exchange.
       if (index >= this.count * .09) {
         const k = index * 5;
