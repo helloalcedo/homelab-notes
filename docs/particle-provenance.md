@@ -14,26 +14,31 @@
 
 ## Local adaptation
 
-현재 홈의 실행 경로는 다음 세 파일이다. 사용하지 않는 이전 hero 전용 엔진과 SVG 발행 흐름은 제거했다.
+2026-09-28 재설계 이후 홈의 실행 경로는 다음 파일이다.
 
-- `assets/js/particles.js` — 전체 viewport에서 유지되는 하나의 입자 풀과 여섯 target geometry
-- `assets/js/experience.js` — 스크롤, hash, 장면 접근성, 테마, reduced motion과 renderer lifecycle
-- `assets/css/experience.css` — 전체 화면 장면 구성과 향상 전 일반 문서 fallback
+- `assets/js/particles.js`: 하나의 입자 풀, WebGL·Canvas 2D 렌더러, 장면 사이의 슬롯 배정, 포인터·파문 변위, 수면 반영 패스, 글 읽기 전환
+- `assets/js/morph.js`: Knothe–Rosenblatt 순위 대응, 5차 이징, 비행 곡선
+- `assets/js/scenes/kingfisher.js`: 00 장면의 물총새·가지·수면과 00→01 잠수
+- `assets/js/scenes/story.js`, `assets/js/scenes/shapes.js`: 01–05 장면의 형태
+- `assets/js/experience.js`, `assets/css/experience.css`: 스크롤 스프링, 장면 문구의 등장·퇴장, 접근성, 대체 경로
+- `assets/js/kingfisher-mark.js`: 정적 페이지 푸터·소개·404의 작은 입자 물총새
 
-참고 소스의 제품 이름, 문구, 폼 동작과 장면 의미는 가져오지 않았다. 로컬 장면은 Homelab Notes의 정보 구조에 맞게 다음 순서로 다시 정의했다.
+참고 소스에서 이어받은 것은 구조적인 방식이다. 전체 화면에 고정된 하나의 WebGL 입자 풀, 스크롤 진행값에 따른 장면 전환, 포인터 반발과 클릭 파문, Canvas 2D 대체, 짙은 먹색 바탕과 작은 모노 라벨의 단순한 배치가 여기에 해당한다. 참고 소스의 제품 이름, 문구, 폼 동작과 장면 의미는 가져오지 않았다.
 
-1. `Alcedo` title
-2. network tree
-3. project card와 code outline
-4. note sheets
-5. Hugo·Velog·GitHub publishing flow
-6. search pill
+물총새의 윤곽은 이 사이트를 위해 새로 그린 벡터 경로(1000×700 설계 좌표, `scenes/kingfisher.js`의 `PATHS`)다. 사진이나 다른 작품을 따라 그리지 않았다. 장면 순서는 다음과 같다.
 
-입자 좌표는 로컬 DOM 레이아웃과 viewport에서 다시 계산한다. 제목은 자체 호스팅한 Instrument Serif의 `Alcedo`를 샘플링하고, 프로젝트·노트·검색 윤곽은 현재 DOM의 bounding rectangle을 기준으로 만든다. 랜덤 시드, particle budget, scene stops, 모바일 좌표, 색과 public API도 이 사이트에 맞게 별도로 정의한다.
+1. 가지 위의 물총새와 수면, 반영
+2. 네트워크 트리
+3. 프로젝트 위젯과 `hugo.toml` 코드
+4. 노트 두 장
+5. 실험 → Hugo·Velog·GitHub → 기록의 발행 흐름
+6. 검색 알약
+
+입자 좌표는 로컬 DOM 레이아웃과 viewport에서 다시 계산한다. 위젯·노트·흐름 노드·검색 알약은 실제 HTML 요소의 위치를 측정해 그 주변을 그린다.
 
 ## Continuous-pool contract
 
-여섯 장면은 서로 다른 입자 인스턴스를 만들지 않는다. breakpoint가 바뀌어 pool을 다시 할당하는 경우를 제외하면 같은 particle buffer가 장면 진행값에 따라 다음 target으로 이동한다. 첫 진입에는 입자로 만든 `Alcedo`만 보이고, 헤더와 장면 내비게이션은 intro를 벗어난 뒤 나타난다.
+여섯 장면은 서로 다른 입자 인스턴스를 만들지 않는다. breakpoint가 바뀌어 pool을 다시 할당하는 경우를 제외하면 같은 particle buffer가 장면 진행값에 따라 다음 target으로 이동한다. 첫 진입에는 입자 물총새만 보이고, 헤더와 장면 내비게이션은 첫 장면을 벗어난 뒤 나타난다.
 
 DOM section은 캔버스가 담당하지 않는 제목, 설명, 링크, 검색 입력과 접근성 이름을 제공한다. WebGL을 사용할 수 없으면 Canvas 2D renderer를 시도하고, renderer가 준비되지 않거나 초기화가 실패하면 향상 클래스를 제거해 이 section을 일반 문서 흐름으로 되돌리는 것이 설계 계약이다. reduced motion에서는 animation loop 대신 현재 target의 정적 frame을 사용한다.
 
@@ -43,4 +48,4 @@ DOM section은 캔버스가 담당하지 않는 제목, 설명, 링크, 검색 �
 
 ## Validation status
 
-이 문서는 출처와 구현 의도를 기록한다. 새 revision의 실제 브라우저 렌더링, 여섯 장면 morph의 시각적 일치, 모바일·reduced motion·fallback 동작 및 GitHub Pages 배포는 별도 검증 기록이 생기기 전까지 완료로 주장하지 않는다.
+이 문서는 출처와 구현 의도를 기록한다. 실제로 실행한 브라우저 검증은 `docs/design.md`의 검증 기록에 적는다. GitHub Pages 배포는 별도로 확인하기 전까지 완료로 주장하지 않는다.

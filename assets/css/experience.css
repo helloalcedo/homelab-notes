@@ -150,9 +150,9 @@ html.immersive-ready { scroll-behavior: auto; scroll-padding-top: 0; }
  .immersive-ready .final-copy h2 { font-size: 30px; }.particle-search { width: min(440px, 100%); }
 }
 @media(max-width:1100px) and (min-width:701px) {
- .immersive-ready .particle-code { left: 40%; width: 24%; }
- .immersive-ready .particle-project { left: 67%; }
- .immersive-ready .particle-note { left: 44%; }.immersive-ready .particle-note:nth-child(2) { left: 70%; }
+ .immersive-ready .particle-code { left: 40%; width: 20%; }
+ .immersive-ready .particle-project { left: auto; right: 6%; width: min(262px, 33vw); }
+ .immersive-ready .particle-note { left: 38%; width: min(25vw, 290px); }.immersive-ready .particle-note:nth-child(2) { left: 67%; }
 }
 @media(max-width:700px) {
  .story-header { inset: 18px 6% auto; }.story-brand { font-size: 21px; }.story-brand span { display: none; }
