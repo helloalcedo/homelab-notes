@@ -1,6 +1,5 @@
 import { READER_MOTION, smoother } from './reader-motion.js';
-import { createFolioField, createFolioPaths, blendFolioParticle } from './particle-flow.js';
-import { createNetworkField, createNetworkPaths } from './network-flow.js';
+import { createChapterScatter, blendChapterTransition, chapterArrivalScale } from './chapter-transition.js';
 
 const TAU = Math.PI * 2;
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
@@ -24,6 +23,7 @@ function copyRect(rect, canvasRect) {
     y: (rect.y ?? rect.top) - canvasRect.top,
     width: rect.width,
     height: rect.height,
+    headerOffset: rect.headerOffset,
   };
 }
 
@@ -66,6 +66,9 @@ export class ParticleExperience {
     this.dpr = 1;
     this.mobile = false;
     this.progress = 0;
+    this.reverseArrivalUntil = 0;
+    this.temperature = 0.3;
+    this.effort = 2;
     this.theme = 'ink';
     this.reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.pointer = { x: -2000, y: -2000 };
@@ -172,6 +175,7 @@ export class ParticleExperience {
     }
     this.layout = {
       project: copyRect(layout.project, canvasRect),
+      code: copyRect(layout.code, canvasRect),
       notes: (layout.notes || []).map(rect => copyRect(rect, canvasRect)).filter(Boolean),
       final: copyRect(layout.final, canvasRect),
       finalButton: copyRect(layout.finalButton, canvasRect),
@@ -206,7 +210,13 @@ export class ParticleExperience {
   }
 
   setProgress(value) {
-    this.progress = clamp(Number(value) || 0, 0, 5.82);
+    const next = clamp(Number(value) || 0, 0, 5.82);
+    // History can skip the entire dissolve window on its way back to Homelab.
+    // Guard that arrival briefly without changing the network's usual pointer response.
+    if (this.progress >= 2 && next >= 1 && next < 2 && this.progress - next > .5) {
+      this.reverseArrivalUntil = this.time + 800;
+    }
+    this.progress = next;
     if (this.pageTurn) this._renderPageTurn();
     else if (this.documentMorph) this._renderDocumentMorph();
     else if (this.reduced) this._snapToTargets();
@@ -546,20 +556,32 @@ export class ParticleExperience {
   _buildGeometry() {
     this._makeTitle();
     this._buildTree();
+    this.projectPoints = [];
+    this.notePoints = [];
     this.finalPoints = [];
     const w = this.width;
     const h = this.height;
     const project = this.layout.project || { x: w * 0.57, y: h * 0.27, width: w * 0.34, height: h * 0.46 };
+    const code = this.layout.code || { x: w * 0.08, y: h * 0.34, width: w * 0.34, height: h * 0.36 };
+    const headerOffset = this.mobile ? 30 : 44;
+    this._sampleRounded(this.projectPoints, project, 16);
+    const projectHeader = project.y + (project.headerOffset ?? headerOffset);
+    this._sampleLine(this.projectPoints, project.x + 14, projectHeader, project.x + project.width - 14, projectHeader, 520);
+    this._sampleRounded(this.projectPoints, code, 10);
+    const codeHeader = code.y + (code.headerOffset ?? headerOffset);
+    this._sampleLine(this.projectPoints, code.x + 14, codeHeader, code.x + code.width - 14, codeHeader, 420);
 
     const notes = this.layout.notes.length ? this.layout.notes : [
       { x: w * 0.16, y: h * 0.28, width: w * 0.28, height: h * 0.46 },
       { x: w * 0.56, y: h * 0.28, width: w * 0.28, height: h * 0.46 },
     ];
-    this.networkField = createNetworkField(this.edges, this.seed, w);
-    this.projectField = createFolioField([project], this.seed, w, h);
-    this.networkPaths = createNetworkPaths(this.networkField, this.projectField, this.edges, this.seed, w);
-    this.noteField = createFolioField(notes.slice(0, 2), this.seed, w, h);
-    this.folioPaths = createFolioPaths(this.projectField, this.noteField, this.seed, w);
+    for (const note of notes.slice(0, 2)) {
+      this._sampleRounded(this.notePoints, note, 5);
+      const noteHeader = note.y + (note.headerOffset ?? headerOffset);
+      this._sampleLine(this.notePoints, note.x + 14, noteHeader, note.x + note.width - 14, noteHeader, 360);
+      const fold = Math.min(20, note.width * 0.12, note.height * 0.12);
+      this._sampleLine(this.notePoints, note.x + note.width - fold, note.y, note.x + note.width, note.y + fold, 90);
+    }
 
     const finalRect = this.layout.final || { x: w * 0.25, y: h * 0.43, width: w * 0.5, height: Math.min(86, h * 0.15) };
     const finalButton = this.layout.finalButton || {
@@ -571,6 +593,7 @@ export class ParticleExperience {
     this._sampleRounded(this.finalPoints, finalRect, finalRect.height / 2);
     this._sampleRounded(this.finalPoints, finalButton, Math.min(finalButton.width, finalButton.height) / 2);
     this._buildFlow();
+    this.chapterScatter = createChapterScatter(this.seed, w, h);
   }
 
   _makeTitle() {
@@ -602,23 +625,21 @@ export class ParticleExperience {
     this.edges = [];
     this.treeNodes = [];
     const startX = this.mobile ? w * 0.10 : w * 0.455;
-    const endX = w * .91;
-    const levels = this.mobile ? 2 : 3;
-    const compact = this.mobile && h <= 800;
-    const centerY = this.mobile ? h * (compact ? .72 : .66) : h * .515;
-    const spread = this.mobile ? h * (compact ? .13 : .20) : h * .325;
+    const endX = this.mobile ? w * 0.91 : w * 0.91;
+    const centerY = this.mobile ? h * 0.66 : h * 0.515;
+    const spread = this.mobile ? h * 0.20 : h * 0.325;
     this.treeCenter = { x: startX, y: centerY };
     const root = { x: startX, y: centerY, id: 0 };
     this.treeNodes.push(root);
     let id = 1;
     const walk = (node, depth, min, max, chosen) => {
-      if (depth === levels) return;
+      if (depth === 4) return;
       const branches = depth === 0 ? 3 : 2;
       for (let j = 0; j < branches; j += 1) {
         const low = min + ((max - min) * j) / branches;
         const high = min + ((max - min) * (j + 1)) / branches;
         const destination = {
-          x: mix(startX, endX, (depth + 1) / levels) + (depth === levels - 1 ? 0 : (random() - 0.5) * w * 0.02),
+          x: mix(startX, endX, (depth + 1) / 4) + (depth === 3 ? 0 : (random() - 0.5) * w * 0.02),
           y: centerY + ((low + high) / 2) * spread + (random() - 0.5) * spread * 0.045,
           id: id++,
         };
@@ -710,13 +731,54 @@ export class ParticleExperience {
       return;
     }
 
-    if (stage === 1 || stage === 2 || stage === 3) {
-      const field = stage === 1 ? this.networkField : stage === 2 ? this.projectField : this.noteField;
-      const k = index * 5;
-      for (let j = 0; j < 5; j++) out[j] = field[k + j];
-      const breath = this.reduced ? 0 : 1;
-      out[0] += Math.sin(this.time * .00032 + b * TAU) * (3 + d * 7) * breath;
-      out[1] += Math.cos(this.time * .00027 + c * TAU) * (4 + b * 8) * breath;
+    if (stage === 1) {
+      const edge = this.edges[Math.floor(a * this.edges.length)];
+      const amount = (b + this.time * 0.000006 * (0.4 + c)) % 1;
+      const eased = amount * amount * (3 - 2 * amount);
+      const spread = (0.35 + c * 1.4) * (1 + (this.effort < 2 ? (2 - this.effort) * 0.6 : 0));
+      out[0] = mix(edge.a.x, edge.b.x, amount) + Math.sin(d * TAU + this.time * 0.001) * spread;
+      out[1] = mix(edge.a.y, edge.b.y, eased) + Math.cos(c * TAU + this.time * 0.001) * spread;
+      if (edge.selected && (edge.depth + amount) / 4 < smooth(0.3, 0.92, local) * 1.2) out[2] = 0.8;
+      out[3] = mix(0.70, edge.selected ? 0.85 : 0.12, smooth(0.58, 0.91, local)) * (0.4 + d * 0.6);
+      out[4] = 0.65 + d * 0.65;
+      if (this.effort < 4 && edge.depth === 3 && c > (this.effort + 1) / 5) {
+        out[0] += (c - 0.4) * 42;
+        out[1] += (d - 0.5) * 45;
+        out[3] *= 0.4;
+      }
+      return;
+    }
+
+    if (stage === 2) {
+      const point = Math.floor(a * (this.projectPoints.length / 2)) * 2;
+      out[0] = this.projectPoints[point] ?? w * 0.72;
+      out[1] = this.projectPoints[point + 1] ?? h * 0.5;
+      out[0] += Math.sin(this.time * 0.0012 + b * TAU) * (0.3 + this.temperature * 1.6);
+      out[1] += Math.cos(this.time * 0.001 + c * TAU) * (0.3 + this.temperature * 1.6);
+      out[2] = Math.max(0, (this.temperature - 0.35) * 1.45);
+      out[3] = (0.22 + d * 0.34) * smooth(0.08, 0.34, local);
+      out[4] = 0.45 + d * 0.35;
+      return;
+    }
+
+    if (stage === 3) {
+      const point = Math.floor(a * (this.notePoints.length / 2)) * 2;
+      const sheetX = this.notePoints[point] ?? w * 0.5;
+      const sheetY = this.notePoints[point + 1] ?? h * 0.5;
+      const collapse = smooth(0.58, 0.94, local);
+      const group = Math.floor(a * 460);
+      const angle = group * 2.399963 + Math.sin(group) * 0.1;
+      const radius = Math.sqrt((group + 0.5) / 460) * (this.mobile ? w * 0.22 : w * 0.16);
+      const turn = collapse * collapse * 8 + this.time * 0.00002;
+      const centerX = w * 0.68;
+      const centerY = this.mobile ? h * 0.64 : h * 0.51;
+      const spiralX = centerX + Math.cos(angle + turn * (1 + a * 0.8)) * (radius * (1 - collapse) + 10);
+      const spiralY = centerY + Math.sin(angle + turn * (1 + a * 0.8)) * (radius * (1 - collapse) + 10) * (this.mobile ? 0.83 : 0.75);
+      out[0] = mix(sheetX, spiralX, collapse);
+      out[1] = mix(sheetY, spiralY, collapse);
+      out[2] = collapse > 0.55 ? (collapse - 0.55) * 2 : 0;
+      out[3] = mix(0.72, 0.9, collapse) * (0.65 + d * 0.35);
+      out[4] = mix(0.72, 1.2, collapse);
       return;
     }
 
@@ -755,30 +817,16 @@ export class ParticleExperience {
   _sceneTarget(stage, local, index, target, next) {
     this._target(stage, index, local, target);
     if (this.reduced) return;
-    if (stage === 1 && local > .40) {
-      if (index >= this.count * .09) {
-        const k = index * 5;
-        for (let j = 0; j < 5; j++) next[j] = this.projectField[k + j];
-        next[0] += target[0] - this.networkField[k];
-        next[1] += target[1] - this.networkField[k + 1];
-        blendFolioParticle(target, next, this.networkPaths, index, local, this.seed[index * 4 + 2], target);
-      }
-    } else if (stage === 2 && local > .38) {
-      // Ambient grains keep their quiet drift instead of joining the exchange.
-      if (index >= this.count * .09) {
-        const k = index * 5;
-        for (let j = 0; j < 5; j++) next[j] = this.noteField[k + j];
-        // Both fields share this grain's breath; evaluate it only once.
-        next[0] += target[0] - this.projectField[k];
-        next[1] += target[1] - this.projectField[k + 1];
-        blendFolioParticle(target, next, this.folioPaths, index, local, this.seed[index * 4 + 2], target);
-      }
-    } else {
-      const transition = stage < 5 ? smoother(.66, 1, local) : 0;
-      if (transition > 0) {
-        this._target(stage + 1, index, 0, next);
-        for (let j = 0; j < 5; j++) target[j] = mix(target[j], next[j], transition);
-      }
+    if (stage === 1 || stage === 2) {
+      if (local <= .50 || index < this.count * .09) return;
+      this._target(stage + 1, index, 0, next);
+      blendChapterTransition(target, next, this.chapterScatter, index, (local - .50) / .50, target);
+      return;
+    }
+    const transition = stage < 5 ? smoother(.66, 1, local) : 0;
+    if (transition > 0) {
+      this._target(stage + 1, index, 0, next);
+      for (let j = 0; j < 5; j++) target[j] += (next[j] - target[j]) * transition;
     }
   }
 
@@ -827,8 +875,8 @@ export class ParticleExperience {
       const pointerY = y - this.pointer.y;
       const pointerDistance = Math.hypot(pointerX, pointerY);
       const pointerRadius = this.mobile ? 62 : 95;
-      // Let scroll-driven folio currents stay calm around readable links.
-      // Free-form scenes retain tactile repulsion.
+      // Interactive frames must keep matching their real links and inputs.
+      // Free-form scenes retain the tactile repulsion; frames use ink tint.
       if ((stage === 0 || stage === 1 || stage === 4) && pointerDistance < pointerRadius && pointerDistance > 0.1) {
         const force = (1 - pointerDistance / pointerRadius) * 2.1;
         vx += (pointerX / pointerDistance) * force;
@@ -881,7 +929,10 @@ export class ParticleExperience {
     this.buffer[offset + 3] = mix(baseR, accentR, warm);
     this.buffer[offset + 4] = mix(baseG, accentG, warm);
     this.buffer[offset + 5] = mix(baseB, accentB, warm);
-    this.buffer[offset + 6] = target[3];
+    const reverseArrival = this.progress >= 1 && this.progress < 2 && this.time < this.reverseArrivalUntil;
+    const arriving = !this.reduced && ((this.progress >= 2 && this.progress < 3.5) || reverseArrival) && index >= this.count * .09;
+    const arrival = arriving ? chapterArrivalScale(x - target[0], y - target[1], this.seed[index * 4 + 3], this.mobile) : 1;
+    this.buffer[offset + 6] = target[3] * arrival;
   }
 
   _prepareGlyphTargets(glyphs, sourcePositions = null) {
