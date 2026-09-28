@@ -18,7 +18,7 @@
 
 - `assets/js/particles.js`: 하나의 입자 풀, WebGL·Canvas 2D 렌더러, 장면 사이의 슬롯 배정, 포인터·파문 변위, 수면 반영 패스, 글 읽기 전환
 - `assets/js/morph.js`: Knothe–Rosenblatt 순위 대응, 5차 이징, 비행 곡선
-- `assets/js/scenes/kingfisher.js`: 00 장면의 `Alcedo` 제목·가지·수면·물보라, 그리고 모든 장면을 따라다니는 동반자 물총새(연못 잠수, 장면 사이 비행, 검색 알약으로의 잠수)
+- `assets/js/scenes/kingfisher.js`: 00 장면의 `Alcedo` 제목·가지·수면·물보라·빛줄기와 잠수 뒤의 하강, 그리고 모든 장면을 따라다니는 동반자 물총새(연못 잠수, 물속 헤엄과 거품, 검색 알약으로의 잠수)
 - `assets/js/scenes/story.js`, `assets/js/scenes/shapes.js`: 01–05 장면의 형태
 - `assets/js/experience.js`, `assets/css/experience.css`: 스크롤 스프링, 장면 문구의 등장·퇴장, 접근성, 대체 경로
 - `assets/js/kingfisher-mark.js`: 정적 페이지 푸터·소개·404의 작은 입자 물총새
