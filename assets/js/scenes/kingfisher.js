@@ -156,6 +156,7 @@ const FLANK = 9;
 const FOLDED = Object.freeze([-Math.PI / 4, Math.SQRT1_2, 1, 1]);
 const SWEPT = Object.freeze([0.3, 1, 1.28, 1]);
 const TUCKED = Object.freeze([-0.36, 1, 1.2, 0.84]);
+const FLARE = Object.freeze([1.05, -0.18, 1.3, 1]);
 /** Wingbeats: quick in the air; underwater a slow scull at rest and fuller strokes to swim. */
 const FLAP = Object.freeze({ beat: 240, up: 1.2, down: -0.8, sweep: 0.32, spread: 1.36, chord: 1.08 });
 const SCULL = Object.freeze({ beat: 1150, up: 0.5, down: -0.32, sweep: 0.64, spread: 1.14, chord: 0.96 });
@@ -171,8 +172,6 @@ export const DIVE = Object.freeze({ focus: 0.08, crouch: 0.18, launch: 0.27, ape
 const DEPART = 0.72;
 /** Fraction of the last swim spent rising above the search pill before the dive. */
 const PILL_APEX = 0.62;
-/** Underwater the bird hovers this many bird-widths above each chapter's element. */
-const HOVER_LIFT = 0.24;
 
 /**
  * How far the reader has sunk with the bird in scene 00: from the hover over the pond the
@@ -247,6 +246,73 @@ function bezier(p0, p1, p2, p3, u, out) {
   out.vx = 3 * v * v * (p1.x - p0.x) + 6 * v * u * (p2.x - p1.x) + 3 * u * u * (p3.x - p2.x);
   out.vy = 3 * v * v * (p1.y - p0.y) + 6 * v * u * (p2.y - p1.y) + 3 * u * u * (p3.y - p2.y);
   return out;
+}
+
+/**
+ * A smooth route through waypoints (centripetal Catmull–Rom, so it never loops or cusps),
+ * sampled by arc length so the bird can swim it at an even, eased pace.
+ */
+function pathThrough(points, perSegment = 24) {
+  const first = points[0];
+  const last = points[points.length - 1];
+  const pts = [
+    { x: 2 * first.x - points[1].x, y: 2 * first.y - points[1].y },
+    ...points,
+    { x: 2 * last.x - points[points.length - 2].x, y: 2 * last.y - points[points.length - 2].y },
+  ];
+  const knot = (a, b) => Math.max(1e-3, Math.sqrt(Math.hypot(b.x - a.x, b.y - a.y)));
+  const xs = [];
+  const ys = [];
+  for (let seg = 1; seg < pts.length - 2; seg += 1) {
+    const [p0, p1, p2, p3] = [pts[seg - 1], pts[seg], pts[seg + 1], pts[seg + 2]];
+    const t1 = knot(p0, p1);
+    const t2 = t1 + knot(p1, p2);
+    const t3 = t2 + knot(p2, p3);
+    for (let k = 0; k < perSegment; k += 1) {
+      const u = mix(t1, t2, k / perSegment);
+      const a1x = mix(p0.x, p1.x, u / t1);
+      const a1y = mix(p0.y, p1.y, u / t1);
+      const a2x = mix(p1.x, p2.x, (u - t1) / (t2 - t1));
+      const a2y = mix(p1.y, p2.y, (u - t1) / (t2 - t1));
+      const a3x = mix(p2.x, p3.x, (u - t2) / (t3 - t2));
+      const a3y = mix(p2.y, p3.y, (u - t2) / (t3 - t2));
+      const b1x = mix(a1x, a2x, u / t2);
+      const b1y = mix(a1y, a2y, u / t2);
+      const b2x = mix(a2x, a3x, (u - t1) / (t3 - t1));
+      const b2y = mix(a2y, a3y, (u - t1) / (t3 - t1));
+      xs.push(mix(b1x, b2x, (u - t1) / (t2 - t1)));
+      ys.push(mix(b1y, b2y, (u - t1) / (t2 - t1)));
+    }
+  }
+  xs.push(last.x);
+  ys.push(last.y);
+  const n = xs.length;
+  const lengths = new Float32Array(n);
+  for (let k = 1; k < n; k += 1) lengths[k] = lengths[k - 1] + Math.hypot(xs[k] - xs[k - 1], ys[k] - ys[k - 1]);
+  const total = lengths[n - 1] || 1;
+  return {
+    total,
+    /** Position and unit heading at arc fraction s. */
+    at(s, out) {
+      const target = clamp01(s) * total;
+      let lo = 0;
+      let hi = n - 1;
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (lengths[mid] <= target) lo = mid;
+        else hi = mid;
+      }
+      const f = (target - lengths[lo]) / (lengths[hi] - lengths[lo] || 1);
+      out.x = mix(xs[lo], xs[hi], f);
+      out.y = mix(ys[lo], ys[hi], f);
+      const dx = xs[hi] - xs[lo];
+      const dy = ys[hi] - ys[lo];
+      const length = Math.hypot(dx, dy) || 1;
+      out.vx = dx / length;
+      out.vy = dy / length;
+      return out;
+    },
+  };
 }
 
 let wingMask = null;
@@ -538,9 +604,11 @@ export function buildSurface({ w, h, mobile, particles, surface }) {
 
 /**
  * The companion: a small rigged kingfisher made of its own particles. It dives into the
- * pond and takes the reader down with it: underwater it swims from chapter to chapter,
- * hovers above each chapter's element trailing bubbles, and finally dives into the search
- * pill and dissolves along its outline. Everything is a function of the rendered progress
+ * pond and takes the reader down with it. Underwater, like a diving bird holding itself
+ * down against its buoyancy, it grips something in each chapter: a knot of the network,
+ * the top of a card it peeks over, a note's edge, a node of the flow. Between spots it
+ * swims routes that go around what is on screen, trailing bubbles, and at the end it dives
+ * into the search pill and dissolves along its outline. Everything is a function of the rendered progress
  * (so scrolling back rewinds it) plus time for breathing, wingbeats and bubbles, so a
  * reader who stops mid-swim finds the bird sculling in place rather than frozen.
  */
@@ -577,13 +645,10 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
   const D = DIVE;
   const centreOf = perch => ({ x: perch.feet.x + (CENTRE[0] - FEET[0]) * scale * perch.facing, y: perch.feet.y + (CENTRE[1] - FEET[1]) * scale });
   const rests = perches.map(centreOf);
-  // Underwater the bird hovers a little above each chapter's element, inside the screen and
-  // clear of the header, the side rail (desktop) and the bottom rail (mobile).
+  // Routes stay inside the screen, below the header and clear of the side rail (desktop) or
+  // the bottom rail (mobile).
   const safe = { left: W * 0.62, right: w - W * 0.62 - (mobile ? 0 : 56), top: 64 + W * 0.45, bottom: h - W * 0.62 - (mobile ? 96 : 0) };
-  const hovers = rests.map((rest, stage) => (stage === 0 ? rest : {
-    x: Math.max(safe.left, Math.min(safe.right, rest.x)),
-    y: Math.max(safe.top, Math.min(safe.bottom, rest.y - W * HOVER_LIFT)),
-  }));
+  const keep = p => ({ x: Math.max(safe.left, Math.min(safe.right, p.x)), y: Math.max(safe.top, Math.min(safe.bottom, p.y)) });
   const forwardOf = facing => (facing >= 0 ? -1 : 1);
   const scratch = [0, 0];
   const place = [0, 0];
@@ -593,10 +658,9 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
   const poseC = [0, 0, 0, 0];
   const poseD = [0, 0, 0, 0];
   const path = { x: 0, y: 0, vx: 0, vy: 0 };
-  const ZERO = Object.freeze({ x: 0, y: 0 });
   const DEFAULT = Object.freeze({
     x: 0, y: 0, facing: 1, pitch: 0, stretch: 1, narrow: 1, wing: 0, wingLength: 1, chord: 1,
-    head: 0, tail: 0, crouch: 0, feet: 1, alpha: 1, clipY: Infinity, idle: 1,
+    head: 0, tail: 0, crouch: 0, feet: 1, alpha: 1, clipY: Infinity, idle: 1, blink: 0, occluder: null,
   });
   const CAMERA = descent(1, surface, h);
   const cameraAt = p => (p >= 1 ? CAMERA : descent(Math.max(0, p), surface, h));
@@ -682,14 +746,54 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
     rig.crouch = 0;
     rig.idle = 0.55 * (1 - travel);
   };
-  const bob = (stage, time) => Math.sin(time * 0.0011 + stage * 1.7) * W * 0.035;
-  const hovering = (rig, stage, time) => {
+  /** Resting: looks down at what it holds, nods now and then, and glances at the pointer. */
+  const curious = (stage, time, look) => {
+    const c = ((time / 5200 + stage * 0.37) % 1 + 1) % 1;
+    const down = Math.sin(Math.PI * smooth(0.16, 0.5, c)) ** 2;
+    const nods = c > 0.6 && c < 0.72 ? Math.sin(((c - 0.6) / 0.12) * TAU) * 0.13 : 0;
+    return mix(look * 0.4, look - 0.1, down) + nods;
+  };
+  const blinking = (stage, time) => {
+    const b = ((time / 3400 + stage * 0.29) % 1 + 1) % 1;
+    return b < 0.045 ? Math.sin((b / 0.045) * Math.PI) : 0;
+  };
+  /** Underwater a bird floats up unless it holds on: it grips its spot, swaying in the current. */
+  const gripping = (rig, stage, time) => {
+    const perch = perches[stage];
     Object.assign(rig, DEFAULT);
-    rig.x = hovers[stage].x;
-    rig.y = hovers[stage].y + bob(stage, time);
-    rig.facing = perches[stage].facing;
-    swimPose(rig, 0, time, 0, 0);
+    rig.x = rests[stage].x;
+    rig.y = rests[stage].y;
+    rig.facing = perch.facing;
+    rig.occluder = perch.occluder || null;
+    rig.pitch = (perch.lean || 0) + Math.sin(time * 0.0008 + stage) * 0.025;
+    rig.head = curious(stage, time, perch.look || 0);
+    rig.blink = blinking(stage, time);
     return rig;
+  };
+  const pushOff = track([[0, 0], [0.05, 1], [0.1, 0]]);
+  const settle = track([[0.95, 0], [0.98, 0.45], [1, 0]]);
+  /**
+   * Swimming a route at normalised time t: push off from the spot, stroke along the route,
+   * brake with the wings forward and the feet reaching out, then grip and fold the wings.
+   */
+  const legPose = (rig, t, time, vx, vy, from, to, { depart = true, arrive = true } = {}) => {
+    const away = depart ? smooth(0.02, 0.12, t) : 1;
+    const brake = arrive ? smooth(0.8, 0.9, t) : 0;
+    const hold = arrive ? smooth(0.93, 1, t) : 0;
+    swimPose(rig, away * (1 - brake), time, vx, vy);
+    const flare = brake * (1 - hold);
+    const fold = Math.max(1 - away, hold);
+    blend(poseC, FLARE, flare, poseD);
+    setWing(rig, blend(poseD, FOLDED, fold, poseD));
+    const spot = t < 0.5 ? from : to;
+    rig.pitch = mix(rig.pitch + flare * 0.32, spot.lean || 0, fold);
+    rig.stretch = mix(rig.stretch, 1, fold);
+    rig.narrow = mix(rig.narrow, 1, fold);
+    rig.head = mix(rig.head, (spot.look || 0) * 0.4, fold);
+    rig.tail = mix(rig.tail + flare * 0.3, 0, fold);
+    rig.feet = Math.max(fold, arrive ? smooth(0.84, 0.92, t) : 0);
+    rig.crouch = (depart ? pushOff(t) : 0) + (arrive ? settle(t) : 0);
+    rig.idle = fold;
   };
   /**
    * Plunge posture at normalised dive time k: the bird noses over ahead of its path, lines
@@ -742,7 +846,6 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
   const deep0 = { x: surface.entry.x + ahead * W, y: safe.bottom };
   const pullOut = { x: plunge0.x * T3 / T2, y: plunge0.y * T3 / T2 };
   const glide = { x: ahead * W * 0.5, y: 0 };
-  const glideOn = { x: glide.x * T4 / T3, y: 0 };
   /** Keep going through the surface, slowing in the water. */
   const underwater = (from, dir, speed, tau, out) => {
     const d = speed * (tau - (0.5 * tau * tau) / 0.24);
@@ -760,8 +863,8 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
   const pillDir = { x: pillAhead * Math.cos(PILL_ANGLE), y: Math.sin(PILL_ANGLE) };
   const billP = billOffset(LEVEL - PILL_ANGLE, pillFacing);
   const entryP = { x: pillEntry.x - billP[0], y: pillEntry.y + 1 - billP[1] };
-  const hover4 = hovers[4];
-  const rise4 = { x: (pillApex.x - hover4.x) * 0.2, y: -h * 0.2 };
+  const rest4 = rests[4];
+  const rise4 = { x: (pillApex.x - rest4.x) * 0.2, y: -h * 0.2 };
   const cruise = { x: pillAhead * W * 1.3, y: 0 };
   const cruiseDive = { x: cruise.x * (1 - PILL_APEX) / (PILL_APEX - 0.03), y: 0 };
   const speedP = Math.hypot(entryP.x - pillApex.x, entryP.y - pillApex.y) * 2.6;
@@ -797,26 +900,66 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
     return out;
   };
 
-  /** Chapter to chapter underwater: dip down through the depth and rise to the next spot. */
-  const swim = (rig, stage, t, time) => {
-    const from = perches[stage];
-    const to = perches[stage + 1];
-    const a = hovers[stage];
-    const b = hovers[stage + 1];
+  // ---- routes between the spots, shaped around what is on screen ----
+  const behind = stage => -forwardOf(perches[stage].facing);
+  const card = perches[2].occluder || null;
+  const cardTop = card ? card.y : rests[2].y;
+  const legs = [
+    // 00 → 01: glide on from the dive, curve up and swoop onto the knot from below and behind.
+    pathThrough([deep0, keep({ x: deep0.x + ahead * W * 0.5, y: deep0.y }), keep({ x: rests[1].x + behind(1) * W * 0.55, y: rests[1].y + W * 0.85 }), rests[1]]),
+    // 01 → 02: up over the network, on past the card and down behind it to peek over the top.
+    pathThrough([rests[1], keep({ x: rests[1].x + Math.sign(rests[2].x - rests[1].x || 1) * W * 0.9, y: rests[1].y - W * 0.7 }), keep({ x: rests[2].x + behind(2) * W * 0.8, y: cardTop - W }), rests[2]]),
+    // 02 → 03: rise out from behind the card, swim on past the note and circle back onto it.
+    pathThrough([rests[2], keep({ x: rests[2].x - behind(2) * W * 0.1, y: cardTop - W * 1.1 }), keep({ x: rests[3].x + behind(3) * W * 0.9, y: rests[3].y - W * 0.7 }), rests[3]]),
+    // 03 → 04: a little hop up and over onto the node.
+    pathThrough([rests[3], keep({ x: mix(rests[3].x, rests[4].x, 0.3), y: Math.min(rests[3].y, rests[4].y) - W * 0.6 }), keep({ x: mix(rests[3].x, rests[4].x, 0.8) + behind(4) * W * 0.2, y: rests[4].y - W * 0.5 }), rests[4]]),
+  ];
+  const look = { x: 0, y: 0, vx: 0, vy: 0 };
+  // Which way the bird faces along each route: it keeps its facing through climbs and dives
+  // and turns only where it really swims back the other way, quickly, through a front view.
+  const FACING_SAMPLES = 96;
+  const facings = legs.map((leg, index) => {
+    const raw = new Float32Array(FACING_SAMPLES + 1);
+    let current = perches[index].facing >= 0 ? 1 : -1;
+    for (let k = 0; k <= FACING_SAMPLES; k += 1) {
+      leg.at(k / FACING_SAMPLES, look);
+      if (Math.abs(look.vx) > 0.35) current = look.vx < 0 ? 1 : -1;
+      raw[k] = current;
+    }
+    const smoothed = new Float32Array(FACING_SAMPLES + 1);
+    const reach = 3;
+    for (let k = 0; k <= FACING_SAMPLES; k += 1) {
+      let sum = 0;
+      for (let j = -reach; j <= reach; j += 1) sum += raw[Math.max(0, Math.min(FACING_SAMPLES, k + j))];
+      smoothed[k] = sum / (reach * 2 + 1);
+    }
+    return s => {
+      const position = clamp01(s) * FACING_SAMPLES;
+      const k = Math.min(FACING_SAMPLES - 1, Math.floor(position));
+      return mix(smoothed[k], smoothed[k + 1], position - k);
+    };
+  });
+  /** Swim route `index` (spot `index` → spot `index + 1`) at normalised time t. */
+  const route = (rig, index, t, time) => {
+    const from = perches[index];
+    const to = perches[index + 1];
+    const leg = legs[index];
+    const fromRest = index > 0;
     Object.assign(rig, DEFAULT);
-    const dx = b.x - a.x;
-    const sag = h * 0.06 + Math.abs(dx) * 0.08;
-    const v = clamp01((t - 0.03) / 0.93);
-    const u = ease(v);
-    const du = (30 * v * v * (1 - v) * (1 - v)) / 0.93;
-    bezier(a, { x: a.x + dx * 0.3, y: a.y + sag }, { x: b.x - dx * 0.3, y: b.y + sag }, b, u, path);
+    let s;
+    if (fromRest) s = ease(clamp01((t - 0.05) / 0.9));
+    else {
+      // Carry on at the speed the bird pulled out of the dive with, then slow to land.
+      const u = clamp01(t / 0.95);
+      const m0 = Math.min(2.5, (Math.hypot(glide.x, glide.y) / T3) * T4 / leg.total);
+      s = 3 * u * u - 2 * u * u * u + (u * u * u - 2 * u * u + u) * m0;
+    }
+    leg.at(s, path);
     rig.x = path.x;
     rig.y = path.y;
-    const heading = Math.abs(dx) < W * 0.3 ? from.facing : dx > 0 ? -1 : 1;
-    rig.facing = mix(mix(from.facing, heading, smooth(0.03, 0.12, t)), to.facing, smooth(0.9, 0.98, t));
-    const travel = smooth(0.02, 0.16, t) * (1 - smooth(0.84, 0.99, t));
-    swimPose(rig, travel, time, path.vx * du, path.vy * du);
-    rig.y += bob(t < 0.5 ? stage : stage + 1, time) * (1 - travel);
+    rig.facing = mix(mix(from.facing, facings[index](s), smooth(0.03, 0.12, t)), to.facing, smooth(0.9, 0.98, t));
+    if ((index === 1 && t > 0.6) || (index === 2 && t < 0.35)) rig.occluder = card;
+    legPose(rig, t, time, path.vx, path.vy, from, to, { depart: fromRest });
     return rig;
   };
 
@@ -877,38 +1020,28 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
         wingBlend(rig, time, open, TUCKED, 1, STROKE, 0.04);
         return rig;
       }
-      // Swim on through the depth to the network's root.
-      perched(rig, 1);
-      const t = (l - D.level) / T4;
-      hermite(deep0, glideOn, hovers[1], ZERO, t, path);
-      rig.x = path.x;
-      rig.y = path.y;
-      rig.facing = mix(f0, perches[1].facing, smooth(0.9, 0.98, t));
-      const travel = 1 - smooth(0.84, 0.99, t);
-      swimPose(rig, travel, time, path.vx, path.vy);
-      rig.y += bob(1, time) * (1 - travel);
-      return rig;
+      // Swim on through the depth to the network and take hold of it.
+      return route(rig, 0, (l - D.level) / T4, time);
     }
     if (stage <= 3) {
-      if (l < DEPART) return hovering(rig, stage, time);
-      return swim(rig, stage, (l - DEPART) / (1 - DEPART), time);
+      if (l < DEPART) return gripping(rig, stage, time);
+      return route(rig, stage, (l - DEPART) / (1 - DEPART), time);
     }
     if (stage === 4) {
-      if (l < DEPART) return hovering(rig, 4, time);
+      if (l < DEPART) return gripping(rig, 4, time);
       const t = (l - DEPART) / (1 - DEPART);
       perched(rig, 4);
       if (t < PILL_APEX) {
+        // Let go of the node and swim up over the search pill.
         const v = clamp01((t - 0.03) / (PILL_APEX - 0.03));
         const u = v * v * (2 - v);
         const du = (v * (4 - 3 * v)) / (PILL_APEX - 0.03);
-        hermite(hover4, rise4, pillApex, cruise, u, path);
+        hermite(rest4, rise4, pillApex, cruise, u, path);
         rig.x = path.x;
         rig.y = path.y;
-        const heading = Math.abs(pillApex.x - hover4.x) < W * 0.3 ? perches[4].facing : pillApex.x > hover4.x ? -1 : 1;
+        const heading = Math.abs(pillApex.x - rest4.x) < W * 0.3 ? perches[4].facing : pillApex.x > rest4.x ? -1 : 1;
         rig.facing = mix(mix(perches[4].facing, heading, smooth(0.03, 0.12, t)), pillFacing, smooth(0.45, PILL_APEX, t));
-        const travel = smooth(0.02, 0.16, t);
-        swimPose(rig, travel, time, path.vx * du, path.vy * du);
-        rig.y += bob(4, time) * (1 - travel);
+        legPose(rig, t, time, path.vx * du, path.vy * du, perches[4], perches[4], { arrive: false });
         return rig;
       }
       const k = (t - PILL_APEX) / (1 - PILL_APEX);
@@ -964,6 +1097,7 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
     } else if (region === FLANK) {
       if (!underWing(x, y, rig)) colour = o + 7;
     } else if (HEADISH.has(region)) {
+      if (region === REGION.eye && rig.blink > 0) y = EYE[1] + (y - EYE[1]) * (1 - 0.85 * rig.blink);
       const idleTilt = rig.idle * (Math.sin(time * 0.00055) * 0.05 + (ctx.pointer.x > -1000 ? Math.max(-1, Math.min(1, (ctx.pointer.y - rig.y) / (h * 0.8))) * 0.1 : 0));
       rotateAbout(x, y, NECK[0], NECK[1], rig.head + idleTilt, scratch);
       x = scratch[0];
@@ -1048,6 +1182,14 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
       out[3] = points[colour];
       out[4] = points[colour + 1];
       out[5] = points[colour + 2];
+      if (region === REGION.eye && rig.blink > 0) {
+        out[3] = mix(out[3], 0.13, rig.blink);
+        out[4] = mix(out[4], 0.5, rig.blink);
+        out[5] = mix(out[5], 0.87, rig.blink);
+      }
+      // Behind a card only what shows above its top edge is visible.
+      const cover = rig.occluder;
+      if (cover && out[0] > cover.x - 1 && out[0] < cover.x + cover.width + 1) alpha *= 1 - smooth(cover.y + 0.5, cover.y + 3, out[1]);
       // Below the surface the warm colours fade first: a cooler, slightly dimmer bird.
       const wet = waterline === -Infinity ? 1 : smooth(waterline - 1, waterline + 4, out[1]);
       if (wet > 0) {
@@ -1081,15 +1223,19 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
           const back = phase * (TRAIL - 1);
           const j = Math.min(TRAIL - 2, Math.floor(back));
           const f = back - j;
-          const x = mix(trail[j * 2], trail[j * 2 + 2], f) + (s[q + 2] - 0.5) * W * 0.35 + Math.sin(phase * 7 + s[q + 3] * 6) * W * 0.05 * phase;
-          const y = mix(trail[j * 2 + 1], trail[j * 2 + 3], f) - camera - W * 0.08 - phase ** 0.85 * (0.8 + 0.7 * s[q + 2]) * W * 1.3;
+          const lead = rigs[0];
+          const x = mix(trail[j * 2], trail[j * 2 + 2], f) - lead.facing * W * 0.15 + (s[q + 2] - 0.5) * W * 0.12 + Math.sin(phase * 7 + s[q + 3] * 6) * W * 0.05 * phase;
+          const y = mix(trail[j * 2 + 1], trail[j * 2 + 3], f) - camera - W * 0.23 - phase ** 0.85 * (0.8 + 0.7 * s[q + 2]) * W * 1.3;
           out[0] = mix(out[0], x, bubbling);
           out[1] = mix(out[1], y, bubbling);
           out[2] = mix(out[2], 0.7 + phase * 1.1 + s[q + 3] * 0.4, bubbling);
           out[3] = mix(out[3], mix(fg[0], flash[0], 0.55), bubbling);
           out[4] = mix(out[4], mix(fg[1], flash[1], 0.55), bubbling);
           out[5] = mix(out[5], mix(fg[2], flash[2], 0.55), bubbling);
-          alpha = mix(alpha, 0.5 * smooth(0, 0.08, phase) * (1 - smooth(0.55, 1, phase)), bubbling);
+          let glow = 0.5 * smooth(0, 0.08, phase) * (1 - smooth(0.55, 1, phase)) * mix(1, 0.6, lead.idle);
+          const card = lead.occluder;
+          if (card && x > card.x - 1 && x < card.x + card.width + 1) glow *= 1 - smooth(card.y + 0.5, card.y + 3, y);
+          alpha = mix(alpha, glow, bubbling);
         }
         out[6] = alpha;
         return;

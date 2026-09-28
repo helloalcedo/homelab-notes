@@ -36,6 +36,8 @@ const layout = () => {
     steps: rects('[data-particle-step]'), chips: rects('[data-particle-chip]'), buttons: rects('[data-particle-button]'),
     notes: rects('[data-particle-note]'), noteRules: rects('[data-particle-note-rule]'), noteDetails: rects('[data-particle-note-detail]'),
     nodes: rects('[data-particle-node]'),
+    // Chapter copy blocks (01–04), which the kingfisher's spots keep clear of.
+    copies: rects('.story-side .scene-copy'),
     final: rect('[data-particle-final]'), finalButton: rect('[data-particle-final-button]'), finalIcon: rect('[data-particle-final-icon]'),
   };
   return result;

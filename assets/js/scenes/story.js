@@ -510,7 +510,13 @@ export function buildStory({ w, h, mobile, layout, particles }) {
   const edgeSpan = scenes[0].groups[0].span;
   /** Fraction within the tree's edge group, or −1 for node rings and the pulse. */
   scenes[0].edgeFraction = fraction => (fraction < edgeSpan ? fraction / edgeSpan : -1);
-  // Perches for the companion kingfisher: the network's root ring and the record node.
-  const anchors = { root: tree.root, rootRing: mobile ? 4.2 : 5.5, result: nodes[4] };
+  // Perches for the companion kingfisher: the upper first-level knot of the network (with
+  // the root as a fallback), and the Hugo and record nodes of the publishing flow.
+  const branch = tree.nodes.find(node => node.depth === 1 && node.y < tree.centerY - 1) || tree.root;
+  const anchors = {
+    root: tree.root, rootRing: mobile ? 4.2 : 5.5,
+    branch, branchRing: branch === tree.root ? (mobile ? 4.2 : 5.5) : (mobile ? 2.4 : 3.1),
+    source: nodes[0], hugo: nodes[1], result: nodes[4],
+  };
   return { tree, scenes, anchors };
 }

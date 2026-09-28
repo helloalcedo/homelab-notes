@@ -558,15 +558,39 @@ export class ParticleExperience {
     this.surface = surfaceLayout({ w, h, mobile });
     const story = buildStory({ w, h, mobile, layout: this.layout, particles });
     this.scenes = [buildSurface({ w, h, mobile, particles, surface: this.surface }), ...story.scenes];
-    const { root, rootRing, result } = story.anchors;
+    const { root, rootRing, branch, branchRing, source, hugo, result } = story.anchors;
     const widget = this.layout.widget;
-    const note = this.layout.notes?.[1] || this.layout.notes?.[0];
+    const [firstNote, secondNote] = this.layout.notes || [];
+    const copies = this.layout.copies || [];
+    const W = this.surface.width;
+    // How badly a spot crowds things: the bird's box off screen, under the header, over the
+    // side rail, or over the chapter's copy. Each chapter takes its least crowded spot.
+    const crowding = (perch, chapter) => {
+      const box = { x0: perch.feet.x - W * 0.62, x1: perch.feet.x + W * 0.62, y0: perch.feet.y - W * 0.66, y1: perch.feet.y + 2 };
+      const copy = copies[chapter - 1];
+      const spill = Math.max(0, 56 - box.y0) + Math.max(0, 4 - box.x0) + Math.max(0, box.x1 - (w - (mobile ? 4 : 60)));
+      const overlap = copy ? Math.max(0, Math.min(box.x1, copy.x + copy.width + 6) - Math.max(box.x0, copy.x - 6)) * Math.max(0, Math.min(box.y1, copy.y + copy.height + 6) - Math.max(box.y0, copy.y - 6)) : 0;
+      return spill * W + overlap;
+    };
+    const pick = (chapter, ...options) => options.filter(Boolean).reduce((best, option) => (crowding(option, chapter) < crowding(best, chapter) - 1 ? option : best));
     const perches = [
       { feet: this.surface.feet, facing: 1 },
-      { feet: { x: root.x, y: root.y - rootRing - 1 }, facing: mobile ? -1 : 1 },
-      widget ? { feet: { x: widget.x + widget.width * 0.74, y: widget.y - 1 }, facing: 1 } : { feet: { x: w * 0.8, y: h * 0.3 }, facing: 1 },
-      note ? { feet: { x: note.x + note.width * 0.52, y: note.y - 1 }, facing: 1 } : { feet: { x: w * 0.8, y: h * 0.35 }, facing: 1 },
-      { feet: { x: result.x, y: result.y - result.r - 1 }, facing: 1 },
+      // 01: gripping a knot high on the network like a submerged branch, looking back at the copy.
+      pick(1,
+        { feet: { x: branch.x, y: branch.y - branchRing - 1 }, facing: 1 },
+        { feet: { x: root.x, y: root.y - rootRing - 1 }, facing: mobile ? -1 : 1 }),
+      // 02: behind the project card, peeking over its top edge.
+      widget ? { feet: { x: widget.x + widget.width * 0.66, y: widget.y + W * 0.22 }, facing: 1, occluder: widget, look: -0.18 } : { feet: { x: w * 0.8, y: h * 0.3 }, facing: 1 },
+      // 03: on a note's top edge, by the folded corner of the first or the middle of the second.
+      pick(3,
+        firstNote && { feet: { x: firstNote.x + firstNote.width * 0.72, y: firstNote.y - 1 }, facing: -1, look: -0.12 },
+        secondNote && { feet: { x: secondNote.x + secondNote.width * 0.5, y: secondNote.y - 1 }, facing: 1, look: -0.12 },
+        !firstNote && !secondNote && { feet: { x: w * 0.8, y: h * 0.35 }, facing: 1 }),
+      // 04: on a node of the flow, facing along it: Hugo, else the experiment, else the record.
+      pick(4,
+        { feet: { x: hugo.x, y: hugo.y - hugo.r - 1 }, facing: -1 },
+        { feet: { x: source.x, y: source.y - source.r - 1 }, facing: -1 },
+        { feet: { x: result.x, y: result.y - result.r - 1 }, facing: 1 }),
     ];
     this.companion = buildCompanion({ w, h, mobile, count: this.birdCount, surface: this.surface, perches, pill: this.layout.final });
     this._assignSlots();
