@@ -1,7 +1,7 @@
 import { READER_MOTION, smoother } from './reader-motion.js';
 import { TAU, clamp01, ease, flightOffset, mix, randomGenerator, rankMatch } from './morph.js';
 import { buildStory } from './scenes/story.js';
-import { buildCompanion, buildSurface, surfaceLayout } from './scenes/kingfisher.js';
+import { DIVE, buildCompanion, buildSurface, descent, surfaceLayout } from './scenes/kingfisher.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 const smooth = (from, to, value) => {
@@ -694,7 +694,8 @@ export class ParticleExperience {
     const w = this.width;
     const h = this.height;
     const time = this.reduced ? 0 : this.time;
-    const depth = this.progress * h * 0.12;
+    // The motes also rise with the pond as the reader sinks through scene 00.
+    const depth = this.progress * h * 0.12 + (this.camera || 0) * 0.85;
     out[0] = ((s[q] * w + time * 0.003 * (s[q + 1] - 0.4)) % w + w) % w;
     out[1] = ((s[q + 2] * h + Math.sin(time * 0.0001 + s[q] * 10) * 12 - time * 0.0016 * (0.3 + s[q + 3]) - depth) % h + h) % h;
     out[2] = 0.45 + s[q + 3] * 0.6;
@@ -710,8 +711,10 @@ export class ParticleExperience {
     if (!this.scenes) return;
     this.scenes[stage].prepare?.(this.ctx);
     this.companion.prepare(this.progress, this.ctx.time);
+    this.camera = descent(stage === 0 ? local : 1, this.surface, this.height);
+    // The pond's reflection goes with the surface once the bird takes the reader under it.
     this.reflection = stage === 0
-      ? { waterY: this.surface.waterY, alpha: 1 - smooth(TRANSITION_START, 0.92, local) }
+      ? { waterY: this.surface.waterY - this.camera, alpha: 1 - smooth(DIVE.entry - 0.02, DIVE.entry + 0.1, local) }
       : { waterY: 0, alpha: 0 };
   }
 

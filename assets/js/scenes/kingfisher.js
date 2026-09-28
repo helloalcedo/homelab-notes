@@ -150,24 +150,37 @@ const WING_BOX = [470, 290, 240, 240];
 const FLANK = 9;
 
 /**
- * Wing poses as [stroke elevation, backward sweep, span]. Elevation is the side-view
+ * Wing poses as [stroke elevation, backward sweep, span, chord]. Elevation is the side-view
  * wingbeat angle (+ up); a wing spread towards the viewer foreshortens to a stub.
  */
-const FOLDED = Object.freeze([-Math.PI / 4, Math.SQRT1_2, 1]);
-const SWEPT = Object.freeze([0.3, 1, 1.28]);
-const TUCKED = Object.freeze([-0.36, 1, 1.2]);
-const FLARE = Object.freeze([1.05, -0.18, 1.3]);
-const FLAP = Object.freeze({ up: 1.2, down: -0.8, sweep: 0.32, spread: 1.36, chord: 1.08 });
-const BEAT_MS = 240;
+const FOLDED = Object.freeze([-Math.PI / 4, Math.SQRT1_2, 1, 1]);
+const SWEPT = Object.freeze([0.3, 1, 1.28, 1]);
+const TUCKED = Object.freeze([-0.36, 1, 1.2, 0.84]);
+/** Wingbeats: quick in the air; underwater a slow scull at rest and fuller strokes to swim. */
+const FLAP = Object.freeze({ beat: 240, up: 1.2, down: -0.8, sweep: 0.32, spread: 1.36, chord: 1.08 });
+const SCULL = Object.freeze({ beat: 1150, up: 0.5, down: -0.32, sweep: 0.64, spread: 1.14, chord: 0.96 });
+const STROKE = Object.freeze({ beat: 540, up: 0.95, down: -0.72, sweep: 0.46, spread: 1.3, chord: 1.02 });
 /** The streamlined dive pose at the moment the bill breaks the surface. */
 const PLUNGE = Object.freeze({ stretch: 1.34, narrow: 0.8, head: 0.3, tail: -0.62 });
+/** Swimming posture at full speed. */
+const SWIM = Object.freeze({ pitch: 0.12, stretch: 1.12, narrow: 0.88, head: 0.14, tail: -0.52 });
 
-/** Scene-00 timeline shared by the pond (splashes) and the bird (dive and return). */
-export const DIVE = Object.freeze({ focus: 0.08, crouch: 0.18, launch: 0.27, apex: 0.36, entry: 0.47, hidden: 0.535, emerge: 0.58, surfaced: 0.66, land: 1 });
-/** Chapter flights start here, in the local progress of the chapter being left. */
-const TAKEOFF = 0.72;
-/** Fraction of the last flight spent climbing above the search pill before the dive. */
+/** Scene-00 timeline shared by the pond (splash, descent) and the bird (dive and swim). */
+export const DIVE = Object.freeze({ focus: 0.08, crouch: 0.18, launch: 0.27, apex: 0.36, entry: 0.47, level: 0.6, arrive: 1 });
+/** Chapter swims start here, in the local progress of the chapter being left. */
+const DEPART = 0.72;
+/** Fraction of the last swim spent rising above the search pill before the dive. */
 const PILL_APEX = 0.62;
+/** Underwater the bird hovers this many bird-widths above each chapter's element. */
+const HOVER_LIFT = 0.24;
+
+/**
+ * How far the reader has sunk with the bird in scene 00: from the hover over the pond the
+ * surface world (title, branch, waterline) slides up until the waterline leaves the top.
+ */
+export function descent(local, surface, h) {
+  return (surface.waterY + h * 0.08) * ease(clamp01((local - DIVE.apex) / 0.46));
+}
 
 const shuffled = (length, seed) => {
   const order = Array.from({ length }, (_, k) => k);
@@ -276,10 +289,9 @@ export function surfaceLayout({ w, h, mobile }) {
   const feet = mobile ? { x: w * 0.8, y: h * 0.72 } : { x: w * 0.855, y: h * 0.745 };
   const waterY = mobile ? h * 0.87 : h * 0.9;
   const bill = { x: feet.x - (FEET[0] - BILL_TIP[0]) * scale, y: feet.y - (FEET[1] - BILL_TIP[1]) * scale };
-  // The bird hops out past the bill, enters there, swims on and surfaces further left.
+  // The bird hops out past the bill and enters there.
   const entry = { x: feet.x - width * 0.9, y: waterY };
-  const emerge = { x: entry.x - width * 0.45, y: waterY };
-  return { width, scale, feet, waterY, bill, entry, emerge, lineLeft: mobile ? w * 0.3 : w * 0.58, lineRight: w * 0.99 };
+  return { width, scale, feet, waterY, bill, entry, lineLeft: mobile ? w * 0.3 : w * 0.58, lineRight: w * 0.99 };
 }
 
 /** Rasterise the Alcedo title like the original landing and keep a shuffled subset. */
@@ -325,13 +337,14 @@ function sampleTitle(text, { w, h, mobile }, count) {
 
 /**
  * Scene 00 without the bird: the Alcedo title in the centre, and at the bottom right a
- * branch over a short waterline with sparkles, faint texture, a dripping bill and the
- * splashes of the dive.
+ * branch over a short waterline with sparkles, light shafts below the surface, a dripping
+ * bill and the splash of the dive. After the dive the whole surface world slides up and
+ * away (see `descent`), so the reader sinks with the bird.
  */
 export function buildSurface({ w, h, mobile, particles, surface }) {
-  const { waterY, lineLeft, lineRight, feet, bill, entry, emerge, scale, width } = surface;
+  const { waterY, lineLeft, lineRight, feet, bill, entry, scale, width } = surface;
   const drop = { phase: 0 };
-  const SPLASHES = [[DIVE.entry, entry.x, 7], [DIVE.emerge + 0.02, emerge.x, 5.5]];
+  const camera = local => descent(local, surface, h);
   const ripple = (x, time, local) => {
     let y = Math.sin(x * 0.018 + time * 0.0012) * 0.7 + Math.sin(x * 0.051 - time * 0.0019) * 0.35;
     const since = drop.phase - 0.22;
@@ -339,26 +352,19 @@ export function buildSurface({ w, h, mobile, particles, surface }) {
       const dx = Math.abs(x - bill.x);
       y += Math.sin(dx * 0.1 - since * 22) * 2 * Math.exp(-since * 5) * Math.exp(-dx / 60);
     }
-    for (const [at, centre, strength] of SPLASHES) {
-      const phase = (local - at) / 0.18;
-      if (phase > 0 && phase < 1) {
-        const dx = Math.abs(x - centre);
-        y += Math.sin(dx * 0.07 - phase * 24) * strength * (1 - phase) * Math.exp(-dx / (w * 0.12));
-      }
+    const phase = (local - DIVE.entry) / 0.18;
+    if (phase > 0 && phase < 1) {
+      const dx = Math.abs(x - entry.x);
+      y += Math.sin(dx * 0.07 - phase * 24) * 7 * (1 - phase) * Math.exp(-dx / (w * 0.12));
     }
     return y;
   };
   // A crown rather than a cone: the water rises in a ring around the hole the bird makes.
   const crown = (x, local) => {
-    let lift = 0;
-    for (const [at, centre, height] of [[DIVE.entry, entry.x, 0.3], [DIVE.emerge + 0.005, emerge.x, 0.24]]) {
-      const phase = (local - at) / 0.09;
-      if (phase > 0 && phase < 1) {
-        const ring = (Math.abs(x - centre) - width * 0.12) / (width * 0.13);
-        lift += Math.sin(Math.PI * phase) * width * height * Math.exp(-ring * ring);
-      }
-    }
-    return lift;
+    const phase = (local - DIVE.entry) / 0.09;
+    if (phase <= 0 || phase >= 1) return 0;
+    const ring = (Math.abs(x - entry.x) - width * 0.12) / (width * 0.13);
+    return Math.sin(Math.PI * phase) * width * 0.3 * Math.exp(-ring * ring);
   };
   const colour = (out, rgb, alpha) => { out[3] = rgb[0]; out[4] = rgb[1]; out[5] = rgb[2]; out[6] = alpha; };
   const branchTip = feet.x - width * 0.42;
@@ -373,7 +379,7 @@ export function buildSurface({ w, h, mobile, particles, surface }) {
           const s = ctx.seed;
           const q = i * 4;
           out[0] = points[k * 2] + (rest ? 0 : Math.sin(ctx.time * 0.0005 + s[q + 1] * TAU) * 0.55);
-          out[1] = points[k * 2 + 1] + (rest ? 0 : Math.cos(ctx.time * 0.0006 + s[q + 2] * TAU) * 0.55);
+          out[1] = points[k * 2 + 1] + (rest ? 0 : Math.cos(ctx.time * 0.0006 + s[q + 2] * TAU) * 0.55) - camera(local);
           out[2] = 0.72 + s[q + 3] * 0.5;
           colour(out, ctx.palette[COLOR.fg], 0.62 + s[q + 3] * 0.38);
         };
@@ -415,7 +421,7 @@ export function buildSurface({ w, h, mobile, particles, surface }) {
           const launch = local - DIVE.launch;
           if (!rest && launch > 0 && launch < 0.25) y -= Math.sin(launch * 70) * Math.exp(-launch * 16) * 5 * reach;
           out[0] = x;
-          out[1] = y;
+          out[1] = y - camera(local);
           out[2] = 0.95 + ctx.seed[i * 4 + 3] * 0.45;
           colour(out, ctx.palette[COLOR.bark], data[k + 2]);
         };
@@ -430,27 +436,30 @@ export function buildSurface({ w, h, mobile, particles, surface }) {
           const s = ctx.seed;
           const q = i * 4;
           out[0] = x + (rest ? 0 : (s[q] - 0.5) * 1.1);
-          out[1] = waterY + (rest ? 0 : ripple(x, ctx.time, local) - crown(x, local) * (0.35 + s[q + 2] * 0.65));
+          out[1] = waterY - camera(local) + (rest ? 0 : ripple(x, ctx.time, local) - crown(x, local) * (0.35 + s[q + 2] * 0.65));
           out[2] = 0.85 + s[q + 3] * 0.45;
           colour(out, ctx.palette[COLOR.fg], (0.34 + s[q + 2] * 0.28) * edge);
         };
       },
     },
     {
+      // Below the surface: faint shafts of light slanting down from the waterline.
       weight: 0.05,
       build() {
+        const SHAFTS = 6;
         return (f, i, local, ctx, out, rest) => {
           const s = ctx.seed;
           const q = i * 4;
-          const depth = (s[q + 1] ** 1.6) * (h - waterY - 6);
-          const span = lineRight - lineLeft;
-          const drift = rest ? 0 : ctx.time * 0.003 * (0.3 + s[q + 2]);
-          const x = lineLeft + ((((f * 7.31 + s[q]) % 1) * span + drift) % span);
-          out[0] = x + (s[q + 3] - 0.5) * 6;
-          out[1] = waterY + 3 + depth + (rest ? 0 : Math.sin(ctx.time * 0.001 + f * 40) * 0.6);
-          out[2] = 0.7 + s[q + 3] * 0.35;
-          const edge = smooth(lineLeft, lineLeft + span * 0.25, x) * smooth(lineRight, lineRight - span * 0.05, x);
-          colour(out, ctx.palette[COLOR.fg], (0.04 + 0.12 * (1 - depth / (h - waterY))) * edge);
+          const shaft = Math.min(SHAFTS - 1, Math.floor(f * SHAFTS));
+          const along = s[q + 1] ** 0.75;
+          const reach = h * 0.95;
+          const origin = mix(lineLeft - w * 0.04, lineRight - w * 0.02, (shaft + 0.5) / SHAFTS) + Math.sin(shaft * 7.1) * w * 0.02;
+          const breadth = (14 + (shaft % 3) * 12) * (1 + along * 1.8);
+          out[0] = origin - along * reach * 0.3 + (s[q] - 0.5) * breadth;
+          out[1] = waterY + 3 + along * reach - camera(local);
+          out[2] = 0.7 + s[q + 3] * 0.4;
+          const shimmer = rest ? 0.5 : 0.5 + 0.5 * Math.sin(ctx.time * 0.0007 * (0.7 + (shaft % 3) * 0.2) + shaft * 2.1 + along * 3);
+          colour(out, ctx.palette[COLOR.fg], (0.03 + 0.1 * shimmer) * (1 - along) ** 1.3 * (0.4 + 0.6 * (1 - Math.abs(s[q] - 0.5) * 2)));
         };
       },
     },
@@ -462,7 +471,7 @@ export function buildSurface({ w, h, mobile, particles, surface }) {
           const q = i * 4;
           const x = mix(lineLeft + (lineRight - lineLeft) * 0.18, lineRight - 8, (f * 13.7 + s[q]) % 1);
           out[0] = x;
-          out[1] = waterY + (s[q + 1] - 0.5) * 3 + (rest ? 0 : ripple(x, ctx.time, local));
+          out[1] = waterY - camera(local) + (s[q + 1] - 0.5) * 3 + (rest ? 0 : ripple(x, ctx.time, local));
           out[2] = 0.95 + s[q + 3] * 0.7;
           const glint = rest ? 0.4 : Math.max(0, Math.sin(ctx.time * 0.0019 * (0.6 + s[q + 3]) + s[q] * TAU)) ** 12;
           colour(out, ctx.palette[s[q + 2] > 0.78 ? COLOR.flash : COLOR.fg], 0.1 + glint * 0.75);
@@ -470,29 +479,26 @@ export function buildSurface({ w, h, mobile, particles, surface }) {
       },
     },
     {
-      // Spray: the entry throws a crown of droplets out from the rim of the hole, and the
-      // bird bursts up through a second, steeper one when it comes out.
-      weight: 0.025,
+      // Spray: the entry throws a crown of droplets out from the rim of the hole.
+      weight: 0.03,
       build() {
         return (f, i, local, ctx, out, rest) => {
           const s = ctx.seed;
           const q = i * 4;
-          const outward = f >= 0.5;
-          const centre = outward ? emerge.x : entry.x;
-          const start = (outward ? DIVE.emerge + 0.004 : DIVE.entry + 0.004) + s[q + 2] * (outward ? 0.02 : 0.03);
-          const t = rest ? -1 : (local - start) / (outward ? 0.1 : 0.08);
+          const start = DIVE.entry + 0.004 + s[q + 2] * 0.03;
+          const t = rest ? -1 : (local - start) / 0.08;
           const side = s[q] < 0.5 ? -1 : 1;
           const spread = Math.abs(s[q] - 0.5) * 2;
-          const rim = width * (outward ? 0.06 : 0.12);
-          out[0] = centre + side * rim;
-          out[1] = waterY;
+          const surfaceY = waterY - camera(local);
+          out[0] = entry.x + side * width * 0.12;
+          out[1] = surfaceY;
           out[2] = 0.65 + s[q + 3] * 0.55;
           colour(out, ctx.palette[COLOR.fg], 0);
           if (t <= 0 || t >= 1) return;
-          const angle = outward ? 0.08 + 0.42 * spread : 0.2 + 0.6 * spread;
-          const height = (0.3 + 0.7 * s[q + 1] ** 1.3) * width * (outward ? 1.05 : 0.72) * Math.cos(angle);
+          const angle = 0.2 + 0.6 * spread;
+          const height = (0.3 + 0.7 * s[q + 1] ** 1.3) * width * 0.75 * Math.cos(angle);
           out[0] += side * Math.min(width * 1.8, 4 * height * Math.tan(angle)) * t;
-          out[1] = waterY - height * 4 * t * (1 - t);
+          out[1] = surfaceY - height * 4 * t * (1 - t);
           const tint = ctx.palette[s[q + 3] > 0.7 ? COLOR.flash : COLOR.fg];
           colour(out, tint, (0.45 + 0.45 * s[q + 3]) * smooth(0, 0.08, t) * (1 - smooth(0.75, 1, t)));
         };
@@ -510,7 +516,7 @@ export function buildSurface({ w, h, mobile, particles, surface }) {
           if (phase < 0.22) {
             const fall = clamp01((phase - 0.08) / 0.14);
             out[0] = bill.x + (s[q] - 0.5) * 1.6;
-            out[1] = mix(bill.y + 1, waterY, fall * fall) + (s[q + 1] - 0.5) * 1.6;
+            out[1] = mix(bill.y + 1, waterY, fall * fall) + (s[q + 1] - 0.5) * 1.6 - camera(local);
             out[2] = 0.8;
             out[6] = smooth(0, 0.08, phase) * 0.8 * idle;
           } else {
@@ -518,7 +524,7 @@ export function buildSurface({ w, h, mobile, particles, surface }) {
             const angle = f * TAU;
             const radius = mix(1.5, width * 0.4, spread) * (0.94 + s[q + 2] * 0.12);
             out[0] = bill.x + Math.cos(angle) * radius;
-            out[1] = waterY + Math.sin(angle) * radius * 0.17;
+            out[1] = waterY + Math.sin(angle) * radius * 0.17 - camera(local);
             out[2] = 0.8;
             out[6] = (1 - smooth(0.25, 0.75, phase)) * 0.5 * idle;
           }
@@ -531,11 +537,12 @@ export function buildSurface({ w, h, mobile, particles, surface }) {
 }
 
 /**
- * The companion: a small rigged kingfisher made of its own particles. It perches in each
- * chapter, dives into the pond, bursts out, flies to the next perch, and finally dives
- * into the search pill and dissolves along its outline. Everything is a function of the
- * rendered progress (so scrolling back rewinds it) plus time for breathing and wingbeats,
- * so a reader who stops mid-flight finds the bird hovering rather than frozen.
+ * The companion: a small rigged kingfisher made of its own particles. It dives into the
+ * pond and takes the reader down with it: underwater it swims from chapter to chapter,
+ * hovers above each chapter's element trailing bubbles, and finally dives into the search
+ * pill and dissolves along its outline. Everything is a function of the rendered progress
+ * (so scrolling back rewinds it) plus time for breathing, wingbeats and bubbles, so a
+ * reader who stops mid-swim finds the bird sculling in place rather than frozen.
  */
 export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) {
   const design = designSamples();
@@ -570,16 +577,29 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
   const D = DIVE;
   const centreOf = perch => ({ x: perch.feet.x + (CENTRE[0] - FEET[0]) * scale * perch.facing, y: perch.feet.y + (CENTRE[1] - FEET[1]) * scale });
   const rests = perches.map(centreOf);
+  // Underwater the bird hovers a little above each chapter's element, inside the screen and
+  // clear of the header, the side rail (desktop) and the bottom rail (mobile).
+  const safe = { left: W * 0.62, right: w - W * 0.62 - (mobile ? 0 : 56), top: 64 + W * 0.45, bottom: h - W * 0.62 - (mobile ? 96 : 0) };
+  const hovers = rests.map((rest, stage) => (stage === 0 ? rest : {
+    x: Math.max(safe.left, Math.min(safe.right, rest.x)),
+    y: Math.max(safe.top, Math.min(safe.bottom, rest.y - W * HOVER_LIFT)),
+  }));
   const forwardOf = facing => (facing >= 0 ? -1 : 1);
   const scratch = [0, 0];
   const place = [0, 0];
   const outline = [0, 0, 0, 0];
+  const poseA = [0, 0, 0, 0];
+  const poseB = [0, 0, 0, 0];
+  const poseC = [0, 0, 0, 0];
+  const poseD = [0, 0, 0, 0];
   const path = { x: 0, y: 0, vx: 0, vy: 0 };
   const ZERO = Object.freeze({ x: 0, y: 0 });
   const DEFAULT = Object.freeze({
     x: 0, y: 0, facing: 1, pitch: 0, stretch: 1, narrow: 1, wing: 0, wingLength: 1, chord: 1,
     head: 0, tail: 0, crouch: 0, feet: 1, alpha: 1, clipY: Infinity, idle: 1,
   });
+  const CAMERA = descent(1, surface, h);
+  const cameraAt = p => (p >= 1 ? CAMERA : descent(Math.max(0, p), surface, h));
 
   /** Design point → screen: streamline along the body axis, pitch about the centre, face. */
   const toScreen = (x, y, rig, breath, out) => {
@@ -610,58 +630,72 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
     rig.facing = perches[stage].facing;
     return rig;
   };
-  /** The side-view wing from [elevation, sweep, span]. */
-  const setWing = (rig, psi, sweep, spread, chord) => {
-    const vy = -Math.sin(psi);
-    rig.wing = Math.atan2(vy, sweep) - Math.PI / 4;
-    rig.wingLength = Math.hypot(sweep, vy) * spread;
-    rig.chord = chord;
+  /** The side-view wing from [elevation, sweep, span, chord]. */
+  const setWing = (rig, pose) => {
+    const vy = -Math.sin(pose[0]);
+    rig.wing = Math.atan2(vy, pose[1]) - Math.PI / 4;
+    rig.wingLength = Math.hypot(pose[1], vy) * pose[2];
+    rig.chord = pose[3];
   };
-  /** 0 with the wings up, 1 at the bottom of the quick power stroke. */
-  const stroke = time => {
-    const p = ((time / BEAT_MS) % 1 + 1) % 1;
+  const blend = (a, b, t, out) => {
+    for (let c = 0; c < 4; c += 1) out[c] = mix(a[c], b[c], t);
+    return out;
+  };
+  /** 0 with the wings up, 1 at the bottom of the power stroke (the quicker 42% of a beat). */
+  const stroke = (time, beat) => {
+    const p = ((time / beat) % 1 + 1) % 1;
     const d = p < 0.42 ? p / 0.42 : 1 - (p - 0.42) / 0.58;
     return d * d * (3 - 2 * d);
   };
-  /** Blend folded → pose by `poseWeight`, then towards the wingbeat by `flapWeight`. */
-  const wingBlend = (rig, time, flapWeight, pose, poseWeight, chord = 1) => {
-    const s = stroke(time);
-    const psi = mix(FOLDED[0], pose[0], poseWeight);
-    const sweep = mix(FOLDED[1], pose[1], poseWeight);
-    const spread = mix(FOLDED[2], pose[2], poseWeight);
-    setWing(rig, mix(psi, mix(FLAP.up, FLAP.down, s), flapWeight), mix(sweep, FLAP.sweep, flapWeight), mix(spread, FLAP.spread, flapWeight), mix(chord, FLAP.chord, flapWeight));
-    // The body rides up on each downstroke.
-    rig.y += (0.5 - s) * W * 0.035 * flapWeight;
+  /** The wing of a stroke style at this moment; returns the stroke phase for the body bob. */
+  const strokePose = (style, time, out) => {
+    const s = stroke(time, style.beat);
+    out[0] = mix(style.up, style.down, s);
+    out[1] = style.sweep;
+    out[2] = style.spread;
+    out[3] = style.chord;
+    return s;
   };
-
-  const crouchUp = track([[0, 0], [0.07, 1], [0.12, 0]]);
-  const crouchDown = track([[0.955, 0], [0.98, 0.5], [1, 0]]);
-  /** Flight posture at normalised time t of a flight with velocity (vx, vy). */
-  const flightPose = (rig, t, time, vx, vy, { airborne = false, land = true } = {}) => {
-    const up = airborne ? 1 : smooth(0.08, 0.16, t);
-    const air = up * (land ? 1 - smooth(0.9, 0.99, t) : 1);
-    const flare = land ? Math.sin(Math.PI * smooth(0.76, 0.97, t)) : 0;
+  /** Blend folded → pose by `poseWeight`, then towards the wingbeat of `style`. */
+  const wingBlend = (rig, time, beatWeight, pose, poseWeight, style = FLAP, bob = 0.035) => {
+    blend(FOLDED, pose, poseWeight, poseA);
+    const s = strokePose(style, time, poseB);
+    setWing(rig, blend(poseA, poseB, beatWeight, poseC));
+    // The body rides up on each downstroke.
+    rig.y += (0.5 - s) * W * bob * beatWeight;
+  };
+  /** Underwater posture: sculling in place at travel 0, full swimming strokes at travel 1. */
+  const swimPose = (rig, travel, time, vx, vy) => {
     const facing = rig.facing >= 0 ? 1 : -1;
-    // The body follows the climb only part way, so a climbing bird still reads as flying.
-    const climb = Math.max(-0.35, Math.min(0.35, Math.atan2(-vy, -facing * vx) * 0.6));
-    const flying = air * (1 - flare);
-    rig.pitch = mix(0, LEVEL + 0.1 + climb, flying) + flare * 0.38;
-    const flapWeight = air * (land ? 1 - smooth(0.74, 0.82, t) : 1);
-    const flareWeight = land ? smooth(0.74, 0.82, t) * (1 - smooth(0.93, 1, t)) : 0;
-    wingBlend(rig, time, flapWeight, FLARE, flareWeight);
-    rig.tail = mix(0, -0.5, flying) + 0.34 * flare;
-    rig.head = 0.12 * flying;
-    rig.feet = clamp01(1 - up + (land ? smooth(0.8, 0.9, t) : 0));
-    rig.stretch = mix(1, 1.06, flying);
-    rig.narrow = mix(1, 0.95, flying);
-    rig.crouch = (airborne ? 0 : crouchUp(t)) + (land ? crouchDown(t) : 0);
-    rig.idle = clamp01((airborne ? 0 : 1 - smooth(0, 0.08, t)) + (land ? smooth(0.97, 1, t) : 0));
+    // Like a diving bird underwater the body stays long and low; it only leans into the climb.
+    const heading = Math.max(-0.32, Math.min(0.32, Math.atan2(-vy, -facing * vx) * 0.55));
+    rig.pitch = LEVEL + SWIM.pitch + mix(Math.sin(time * 0.0009) * 0.06, heading, travel);
+    const a = strokePose(SCULL, time, poseA);
+    const b = strokePose(STROKE, time, poseB);
+    setWing(rig, blend(poseA, poseB, travel, poseC));
+    rig.y += mix((0.5 - a) * 0.02, (0.5 - b) * 0.04, travel) * W;
+    rig.stretch = mix(1.03, SWIM.stretch, travel);
+    rig.narrow = mix(0.97, SWIM.narrow, travel);
+    rig.head = mix(0.08, SWIM.head, travel);
+    rig.tail = mix(-0.42 + Math.sin(time * 0.0017) * 0.08, SWIM.tail, travel);
+    rig.feet = 0;
+    rig.crouch = 0;
+    rig.idle = 0.55 * (1 - travel);
+  };
+  const bob = (stage, time) => Math.sin(time * 0.0011 + stage * 1.7) * W * 0.035;
+  const hovering = (rig, stage, time) => {
+    Object.assign(rig, DEFAULT);
+    rig.x = hovers[stage].x;
+    rig.y = hovers[stage].y + bob(stage, time);
+    rig.facing = perches[stage].facing;
+    swimPose(rig, 0, time, 0, 0);
+    return rig;
   };
   /**
    * Plunge posture at normalised dive time k: the bird noses over ahead of its path, lines
    * its body up with the fall, and sweeps its wings back until it is an arrow at entry.
    */
-  const divePose = (rig, k, time, vx, vy, start) => {
+  const divePose = (rig, k, time, vx, vy, start, style = FLAP) => {
     const facing = rig.facing >= 0 ? 1 : -1;
     const aligned = LEVEL + Math.atan2(-vy, -facing * vx);
     const lead = -0.28 * Math.sin(Math.PI * smooth(0, 0.7, k));
@@ -673,12 +707,10 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
     rig.crouch = 0;
     rig.feet = 0;
     rig.idle = 0;
-    const tuck = smooth(0.35, 0.95, k);
-    const pose = [mix(SWEPT[0], TUCKED[0], tuck), mix(SWEPT[1], TUCKED[1], tuck), mix(SWEPT[2], TUCKED[2], tuck)];
-    wingBlend(rig, time, 1 - smooth(0, 0.3, k), pose, 1, mix(1, 0.84, tuck));
+    wingBlend(rig, time, 1 - smooth(0, 0.3, k), blend(SWEPT, TUCKED, smooth(0.35, 0.95, k), poseD), 1, style, style === FLAP ? 0.035 : 0.04);
   };
 
-  // ---- 00: the dive into the pond ----
+  // ---- 00: the dive into the pond, and down with the reader ----
   const f0 = perches[0].facing;
   const ahead = forwardOf(f0);
   const rest0 = rests[0];
@@ -686,9 +718,12 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
   const apex0 = { x: rest0.x + ahead * W * 0.42, y: rest0.y - W * 0.52 };
   const entryDir = { x: ahead * Math.cos(ENTRY_ANGLE), y: Math.sin(ENTRY_ANGLE) };
   const bill0 = billOffset(LEVEL - ENTRY_ANGLE, f0);
-  const entry0 = { x: surface.entry.x - bill0[0], y: surface.waterY + 1 - bill0[1] };
+  // The surface is already sliding up when the bill reaches it.
+  const entry0 = { x: surface.entry.x - bill0[0], y: surface.waterY - descent(D.entry, surface, h) + 1 - bill0[1] };
   const T1 = D.apex - D.launch;
   const T2 = D.entry - D.apex;
+  const T3 = D.level - D.entry;
+  const T4 = D.arrive - D.level;
   const push = { x: ahead * W * 0.3, y: -W * 0.8 };
   const hover1 = { x: ahead * W * 0.4, y: 0 };
   const hover2 = { x: hover1.x * T2 / T1, y: 0 };
@@ -703,13 +738,11 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
     flap: track([[D.launch - 0.01, 0], [D.launch + 0.02, 1]]),
     feet: track([[D.launch, 1], [D.launch + 0.04, 0]]),
   };
-  const under0 = { x: surface.emerge.x - ahead * W * 0.04, y: surface.waterY + W * 0.62 };
-  const clear0 = { x: surface.emerge.x + ahead * W * 0.38, y: surface.waterY - W * 1.1 };
-  const T3 = D.surfaced - D.emerge;
-  const T4 = D.land - D.surfaced;
-  const burst = { x: ahead * W * 0.15, y: -W * 2.4 };
-  const climbOut = { x: ahead * W * 1.0, y: -W * 0.55 };
-  const climbOn = { x: climbOut.x * T4 / T3, y: climbOut.y * T4 / T3 };
+  // Momentum carries it deep, low on the screen, before it pulls out and swims on.
+  const deep0 = { x: surface.entry.x + ahead * W, y: safe.bottom };
+  const pullOut = { x: plunge0.x * T3 / T2, y: plunge0.y * T3 / T2 };
+  const glide = { x: ahead * W * 0.5, y: 0 };
+  const glideOn = { x: glide.x * T4 / T3, y: 0 };
   /** Keep going through the surface, slowing in the water. */
   const underwater = (from, dir, speed, tau, out) => {
     const d = speed * (tau - (0.5 * tau * tau) / 0.24);
@@ -727,14 +760,14 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
   const pillDir = { x: pillAhead * Math.cos(PILL_ANGLE), y: Math.sin(PILL_ANGLE) };
   const billP = billOffset(LEVEL - PILL_ANGLE, pillFacing);
   const entryP = { x: pillEntry.x - billP[0], y: pillEntry.y + 1 - billP[1] };
-  const rest4 = rests[4];
+  const hover4 = hovers[4];
+  const rise4 = { x: (pillApex.x - hover4.x) * 0.2, y: -h * 0.2 };
   const cruise = { x: pillAhead * W * 1.3, y: 0 };
-  const cruiseDive = { x: cruise.x * (1 - PILL_APEX) / (PILL_APEX - 0.1), y: 0 };
+  const cruiseDive = { x: cruise.x * (1 - PILL_APEX) / (PILL_APEX - 0.03), y: 0 };
   const speedP = Math.hypot(entryP.x - pillApex.x, entryP.y - pillApex.y) * 2.6;
   const plungeP = { x: pillDir.x * speedP, y: pillDir.y * speedP };
-  const T_PILL = (1 - PILL_APEX) * (1 - TAKEOFF);
-  const pillSpeed = speedP / T_PILL;
-  const cruisePose = { pitch: LEVEL + 0.1, head: 0.12, stretch: 1.06, narrow: 0.95, tail: -0.5 };
+  const pillSpeed = speedP / ((1 - PILL_APEX) * (1 - DEPART));
+  const swimStart = { pitch: LEVEL + SWIM.pitch, head: SWIM.head, stretch: SWIM.stretch, narrow: SWIM.narrow, tail: SWIM.tail };
   const pillPerimeter = pill ? 2 * (pill.width - pill.height) + Math.PI * pill.height : 1;
   /** A point on the rounded pill outline (x, y and outward normal), measured from the entry. */
   const pillPoint = (distance, out) => {
@@ -764,22 +797,26 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
     return out;
   };
 
-  /** A chapter-to-chapter flight: crouch, leap, an arc of wingbeats, flare and settle. */
-  const hop = (rig, from, fromRest, to, toRest, t, time) => {
+  /** Chapter to chapter underwater: dip down through the depth and rise to the next spot. */
+  const swim = (rig, stage, t, time) => {
+    const from = perches[stage];
+    const to = perches[stage + 1];
+    const a = hovers[stage];
+    const b = hovers[stage + 1];
     Object.assign(rig, DEFAULT);
-    const dx = toRest.x - fromRest.x;
-    const rise = h * 0.05 + Math.abs(dx) * 0.12 + Math.max(0, fromRest.y - toRest.y) * 0.3;
-    const p1 = { x: fromRest.x + dx * 0.3, y: fromRest.y - rise * 0.8 };
-    const p2 = { x: toRest.x - dx * 0.25, y: toRest.y - rise * 0.55 };
-    const v = clamp01((t - 0.1) / 0.85);
+    const dx = b.x - a.x;
+    const sag = h * 0.06 + Math.abs(dx) * 0.08;
+    const v = clamp01((t - 0.03) / 0.93);
     const u = ease(v);
-    const du = (30 * v * v * (1 - v) * (1 - v)) / 0.85;
-    bezier(fromRest, p1, p2, toRest, u, path);
+    const du = (30 * v * v * (1 - v) * (1 - v)) / 0.93;
+    bezier(a, { x: a.x + dx * 0.3, y: a.y + sag }, { x: b.x - dx * 0.3, y: b.y + sag }, b, u, path);
     rig.x = path.x;
     rig.y = path.y;
     const heading = Math.abs(dx) < W * 0.3 ? from.facing : dx > 0 ? -1 : 1;
-    rig.facing = mix(mix(from.facing, heading, smooth(0.1, 0.17, t)), to.facing, smooth(0.955, 1, t));
-    flightPose(rig, t, time, path.vx * du, path.vy * du);
+    rig.facing = mix(mix(from.facing, heading, smooth(0.03, 0.12, t)), to.facing, smooth(0.9, 0.98, t));
+    const travel = smooth(0.02, 0.16, t) * (1 - smooth(0.84, 0.99, t));
+    swimPose(rig, travel, time, path.vx * du, path.vy * du);
+    rig.y += bob(t < 0.5 ? stage : stage + 1, time) * (1 - travel);
     return rig;
   };
 
@@ -821,65 +858,57 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
         divePose(rig, (l - D.apex) / T2, time, path.vx, path.vy, hoverPose);
         return rig;
       }
-      if (l < D.emerge) {
+      if (l < D.level) {
+        // Through the surface and on down; it pulls out of the dive and opens its wings.
         perched(rig, 0);
-        divePose(rig, 1, time, entryDir.x, entryDir.y, hoverPose);
-        underwater(entry0, entryDir, speed0 / T2, Math.min(l, D.hidden) - D.entry, path);
-        rig.x = path.x;
-        rig.y = path.y;
-        rig.clipY = surface.waterY + 1;
-        rig.alpha = 1 - smooth(D.hidden - 0.012, D.hidden, l);
-        return rig;
-      }
-      if (l < D.surfaced) {
-        // Burst out almost vertically, wings opening as soon as they clear the water.
-        perched(rig, 0);
-        const u = (l - D.emerge) / T3;
-        hermite(under0, burst, clear0, climbOut, u, path);
+        const k = (l - D.entry) / T3;
+        hermite(entry0, pullOut, deep0, glide, k, path);
         rig.x = path.x;
         rig.y = path.y;
         rig.idle = 0;
         rig.feet = 0;
-        const rising = Math.atan2(-path.vy, path.vx * ahead);
-        rig.pitch = LEVEL + 0.1 + mix(rising, Math.max(-0.35, Math.min(0.35, rising * 0.6)), smooth(0.4, 1, u));
-        rig.head = mix(PLUNGE.head, 0.12, smooth(0, 0.8, u));
-        rig.tail = mix(PLUNGE.tail, -0.5, u);
-        rig.stretch = mix(1.2, 1.06, u);
-        rig.narrow = mix(0.85, 0.95, u);
-        const open = smooth(0.12, 0.35, u);
-        wingBlend(rig, time, open, TUCKED, 1, mix(0.84, 1, open));
-        rig.clipY = surface.waterY + 1;
+        const aligned = LEVEL + Math.atan2(-path.vy, path.vx * ahead);
+        rig.pitch = mix(aligned, LEVEL + SWIM.pitch + Math.max(-0.32, Math.min(0.32, (aligned - LEVEL) * 0.55)), smooth(0.55, 1, k));
+        const open = smooth(0.3, 0.85, k);
+        rig.stretch = mix(PLUNGE.stretch, SWIM.stretch, open);
+        rig.narrow = mix(PLUNGE.narrow, SWIM.narrow, open);
+        rig.head = mix(PLUNGE.head, SWIM.head, open);
+        rig.tail = mix(PLUNGE.tail, SWIM.tail, open);
+        wingBlend(rig, time, open, TUCKED, 1, STROKE, 0.04);
         return rig;
       }
-      // Climb away and land on the network's root.
+      // Swim on through the depth to the network's root.
       perched(rig, 1);
-      const t = (l - D.surfaced) / T4;
-      hermite(clear0, climbOn, rests[1], ZERO, t, path);
+      const t = (l - D.level) / T4;
+      hermite(deep0, glideOn, hovers[1], ZERO, t, path);
       rig.x = path.x;
       rig.y = path.y;
-      rig.facing = mix(f0, perches[1].facing, smooth(0.955, 1, t));
-      flightPose(rig, t, time, path.vx, path.vy, { airborne: true });
+      rig.facing = mix(f0, perches[1].facing, smooth(0.9, 0.98, t));
+      const travel = 1 - smooth(0.84, 0.99, t);
+      swimPose(rig, travel, time, path.vx, path.vy);
+      rig.y += bob(1, time) * (1 - travel);
       return rig;
     }
     if (stage <= 3) {
-      if (l < TAKEOFF) return perched(rig, stage);
-      return hop(rig, perches[stage], rests[stage], perches[stage + 1], rests[stage + 1], (l - TAKEOFF) / (1 - TAKEOFF), time);
+      if (l < DEPART) return hovering(rig, stage, time);
+      return swim(rig, stage, (l - DEPART) / (1 - DEPART), time);
     }
     if (stage === 4) {
-      if (l < TAKEOFF) return perched(rig, 4);
-      const t = (l - TAKEOFF) / (1 - TAKEOFF);
+      if (l < DEPART) return hovering(rig, 4, time);
+      const t = (l - DEPART) / (1 - DEPART);
       perched(rig, 4);
       if (t < PILL_APEX) {
-        const v = clamp01((t - 0.1) / (PILL_APEX - 0.1));
+        const v = clamp01((t - 0.03) / (PILL_APEX - 0.03));
         const u = v * v * (2 - v);
-        const du = (v * (4 - 3 * v)) / (PILL_APEX - 0.1);
-        const up = { x: (pillApex.x - rest4.x) * 0.2, y: -h * 0.35 };
-        hermite(rest4, up, pillApex, cruise, u, path);
+        const du = (v * (4 - 3 * v)) / (PILL_APEX - 0.03);
+        hermite(hover4, rise4, pillApex, cruise, u, path);
         rig.x = path.x;
         rig.y = path.y;
-        const heading = Math.abs(pillApex.x - rest4.x) < W * 0.3 ? perches[4].facing : pillApex.x > rest4.x ? -1 : 1;
-        rig.facing = mix(mix(perches[4].facing, heading, smooth(0.1, 0.17, t)), pillFacing, smooth(0.45, PILL_APEX, t));
-        flightPose(rig, t, time, path.vx * du, path.vy * du, { land: false });
+        const heading = Math.abs(pillApex.x - hover4.x) < W * 0.3 ? perches[4].facing : pillApex.x > hover4.x ? -1 : 1;
+        rig.facing = mix(mix(perches[4].facing, heading, smooth(0.03, 0.12, t)), pillFacing, smooth(0.45, PILL_APEX, t));
+        const travel = smooth(0.02, 0.16, t);
+        swimPose(rig, travel, time, path.vx * du, path.vy * du);
+        rig.y += bob(4, time) * (1 - travel);
         return rig;
       }
       const k = (t - PILL_APEX) / (1 - PILL_APEX);
@@ -887,13 +916,13 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
       rig.x = path.x;
       rig.y = path.y;
       rig.facing = pillFacing;
-      divePose(rig, k, time, path.vx, path.vy, cruisePose);
+      divePose(rig, k, time, path.vx, path.vy, swimStart, STROKE);
       return rig;
     }
     // 05: gone into the pill.
     perched(rig, 4);
     rig.facing = pillFacing;
-    divePose(rig, 1, time, pillDir.x, pillDir.y, cruisePose);
+    divePose(rig, 1, time, pillDir.x, pillDir.y, swimStart, STROKE);
     underwater(entryP, pillDir, pillSpeed, Math.min(l, 0.07), path);
     rig.x = path.x;
     rig.y = path.y;
@@ -960,21 +989,38 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
 
   const LEVELS = 5;
   const rigs = Array.from({ length: LEVELS }, () => ({ ...DEFAULT }));
+  // Where the bird was a little earlier, in world space: bubbles rise from along this trail.
+  const TRAIL = 8;
+  const trail = new Float32Array(TRAIL * 2);
+  const probe = { ...DEFAULT };
+  const isBubble = k => k % 16 === 5;
   let streak = 0;
   let rippleT = 0;
   let splash = null;
+  let bubbling = 0;
+  let camera = 0;
+  let waterline = -Infinity;
   return {
-    /** Once per frame: the rig at a few lag levels (motion streaks while diving) and splashes. */
+    /** Once per frame: the rig at a few lag levels (motion streaks), the bubble trail, splashes. */
     prepare(progress, time) {
       const stage = Math.min(5, Math.floor(progress));
       const l = progress - stage;
-      const diving = (stage === 0 && l > D.apex + 0.02 && l < D.hidden) || (stage === 4 && l > TAKEOFF + (1 - TAKEOFF) * PILL_APEX) || (stage === 5 && l < 0.07);
+      const diving = (stage === 0 && l > D.apex + 0.02 && l < D.entry + 0.05) || (stage === 4 && l > DEPART + (1 - DEPART) * PILL_APEX) || (stage === 5 && l < 0.07);
       streak = diving ? 1 : 0;
       rippleT = stage === 5 && pill ? clamp01((l - 0.012) / 0.22) : 0;
-      splash = null;
-      if (stage === 0 && l >= D.entry && l < D.emerge) splash = { x: surface.entry.x, y: surface.waterY, since: l - D.entry };
-      else if (stage === 5 && l < 0.2) splash = { x: pillEntry.x, y: pillEntry.y, since: l };
+      splash = stage === 5 && l < 0.2 ? { x: pillEntry.x, y: pillEntry.y, since: l } : null;
+      bubbling = stage === 0 ? smooth(D.entry - 0.005, D.entry + 0.04, l) : stage === 5 ? 1 - smooth(0, 0.12, l) : 1;
+      camera = cameraAt(progress);
+      waterline = stage === 0 ? surface.waterY - camera : -Infinity;
       for (let level = 0; level < LEVELS; level += 1) rigAt(Math.max(0, progress - level * 0.0016 * streak), time, rigs[level]);
+      if (bubbling > 0) {
+        for (let j = 0; j < TRAIL; j += 1) {
+          const earlier = Math.max(0, progress - j * 0.012);
+          rigAt(earlier, time, probe);
+          trail[j * 2] = probe.x;
+          trail[j * 2 + 1] = probe.y + cameraAt(earlier);
+        }
+      }
     },
     pose(k, i, ctx, out) {
       const o = k * STRIDE;
@@ -1002,31 +1048,50 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
       out[3] = points[colour];
       out[4] = points[colour + 1];
       out[5] = points[colour + 2];
+      // Below the surface the warm colours fade first: a cooler, slightly dimmer bird.
+      const wet = waterline === -Infinity ? 1 : smooth(waterline - 1, waterline + 4, out[1]);
+      if (wet > 0) {
+        out[3] *= 1 - 0.2 * wet;
+        out[4] *= 1 - 0.06 * wet;
+        out[5] = Math.min(1, out[5] + 0.05 * wet);
+        alpha *= 1 - 0.08 * wet;
+      }
       const submerged = out[1] > rig.clipY;
       if (submerged) alpha *= 1 - smooth(0, 3, out[1] - rig.clipY);
-      // What goes under comes back up: about a third of the submerged particles are the
-      // splash, a crown thrown out from the rim of the hole and, a beat later, a jet.
+      const fg = ctx.palette[COLOR.fg];
+      const flash = ctx.palette[COLOR.flash];
+      // Into the pill: about a third of what goes under comes back up as bubbles.
       if (splash && s[q + 2] > 0.66 && (submerged || rig.alpha < 1)) {
-        let tau;
-        if (s[q + 1] > 0.88) {
-          // The jet: a short column that rises through the collapsing hole and breaks up.
-          tau = clamp01((splash.since - 0.03 - s[q] * 0.014) / 0.065);
-          out[0] = splash.x + (s[q] - 0.5) * W * 0.09 + (((k * 0.6180339) % 1) - 0.5) * W * 0.3 * tau;
-          out[1] = splash.y - (0.3 + 0.45 * s[q + 3]) * W * 4 * tau * (1 - tau);
-        } else {
-          tau = clamp01((splash.since - axial * 0.035) / 0.075);
-          const side = k & 1 ? 1 : -1;
-          const angle = 0.16 + 0.6 * s[q];
-          const height = (0.25 + 0.75 * (s[q + 1] / 0.88) ** 1.3) * W * 0.8 * Math.cos(angle);
-          out[0] = splash.x + side * (W * 0.1 + Math.min(W * 1.7, 4 * height * Math.tan(angle)) * tau);
-          out[1] = splash.y - height * 4 * tau * (1 - tau);
+        const tau = clamp01((splash.since - axial * 0.035) / 0.12);
+        const side = k & 1 ? 1 : -1;
+        out[0] = splash.x + side * (0.04 + 0.55 * s[q]) * W * Math.sqrt(tau) + Math.sin(tau * 9 + s[q + 3] * 6) * W * 0.04;
+        out[1] = splash.y - (0.3 + 0.95 * s[q + 1]) * W * tau;
+        out[2] = 0.6 + tau * 1.1 + s[q + 3] * 0.3;
+        out[3] = mix(fg[0], flash[0], 0.55);
+        out[4] = mix(fg[1], flash[1], 0.55);
+        out[5] = mix(fg[2], flash[2], 0.55);
+        out[6] = tau > 0 ? 0.7 * (1 - smooth(0.55, 1, tau)) : 0;
+        return;
+      }
+      // Underwater a stream of bubbles rises from the bird and from where it has just been.
+      if (isBubble(k)) {
+        if (bubbling > 0) {
+          const period = 1500 + 1300 * s[q + 1];
+          const phase = ((ctx.time / period + s[q]) % 1 + 1) % 1;
+          const back = phase * (TRAIL - 1);
+          const j = Math.min(TRAIL - 2, Math.floor(back));
+          const f = back - j;
+          const x = mix(trail[j * 2], trail[j * 2 + 2], f) + (s[q + 2] - 0.5) * W * 0.35 + Math.sin(phase * 7 + s[q + 3] * 6) * W * 0.05 * phase;
+          const y = mix(trail[j * 2 + 1], trail[j * 2 + 3], f) - camera - W * 0.08 - phase ** 0.85 * (0.8 + 0.7 * s[q + 2]) * W * 1.3;
+          out[0] = mix(out[0], x, bubbling);
+          out[1] = mix(out[1], y, bubbling);
+          out[2] = mix(out[2], 0.7 + phase * 1.1 + s[q + 3] * 0.4, bubbling);
+          out[3] = mix(out[3], mix(fg[0], flash[0], 0.55), bubbling);
+          out[4] = mix(out[4], mix(fg[1], flash[1], 0.55), bubbling);
+          out[5] = mix(out[5], mix(fg[2], flash[2], 0.55), bubbling);
+          alpha = mix(alpha, 0.5 * smooth(0, 0.08, phase) * (1 - smooth(0.55, 1, phase)), bubbling);
         }
-        out[2] = 0.6 + s[q + 3] * 0.45;
-        const tint = ctx.palette[s[q + 3] > 0.6 ? COLOR.flash : COLOR.fg];
-        out[3] = tint[0];
-        out[4] = tint[1];
-        out[5] = tint[2];
-        out[6] = tau > 0 ? 0.85 * (1 - smooth(0.72, 1, tau)) : 0;
+        out[6] = alpha;
         return;
       }
       // In the pill the bird's particles become a ripple of light: it runs both ways round
@@ -1042,10 +1107,9 @@ export function buildCompanion({ w, h, mobile, count, surface, perches, pill }) 
           out[1] = mix(out[1], outline[1] + outline[3] * spread, absorb);
           alpha = mix(alpha, (0.6 + 0.4 * s[q + 3]) * (1 - smooth(0.62, 1, rippleT)) * (1 - 0.5 * s[q]), absorb);
           out[2] = mix(out[2], 1 + s[q + 3] * 0.6, absorb);
-          const glow = ctx.palette[COLOR.flash];
-          out[3] = mix(out[3], glow[0], absorb);
-          out[4] = mix(out[4], glow[1], absorb);
-          out[5] = mix(out[5], glow[2], absorb);
+          out[3] = mix(out[3], flash[0], absorb);
+          out[4] = mix(out[4], flash[1], absorb);
+          out[5] = mix(out[5], flash[2], absorb);
         }
       }
       out[6] = alpha;
